@@ -3,6 +3,13 @@ FROM golang:1.24-alpine AS builder
 
 WORKDIR /build
 
+# 配置国内镜像源
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+
+# 配置 Go 国内代理
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GO111MODULE=on
+
 # 安装编译依赖
 RUN apk add --no-cache git
 
@@ -20,6 +27,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 # ============ Stage 2: 运行时环境 ============
 FROM jrottenberg/ffmpeg:6.1-alpine
 
+# 配置国内镜像源
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+
 # 创建应用目录
 WORKDIR /app
 
@@ -28,6 +38,9 @@ COPY --from=builder /build/stm /usr/local/bin/stm
 
 # 复制默认配置
 COPY configs/config.yaml /app/config.yaml
+
+# 复制HTML模板文件
+COPY --from=builder /build/internal/web/templates /app/templates
 
 # 创建数据目录
 RUN mkdir -p /data /input /output

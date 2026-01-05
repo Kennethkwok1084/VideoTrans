@@ -3,7 +3,10 @@ package web
 import (
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -33,7 +36,7 @@ func New(cfg *config.Config, db *database.DB, scan *scanner.Scanner, work *worke
 	router := gin.Default()
 
 	// 加载HTML模板
-	router.LoadHTMLGlob("internal/web/templates/*.html")
+	router.LoadHTMLGlob("/app/templates/*.html")
 
 	s := &Server{
 		config:  cfg,
@@ -61,6 +64,11 @@ func (s *Server) setupRoutes() {
 		api.GET("/worker/status", s.handleWorkerStatus)
 		api.POST("/worker/force-start", s.handleForceStart)
 		api.POST("/worker/force-stop", s.handleForceStop)
+		api.POST("/worker/set-max", s.handleSetMaxWorkers)
+		api.GET("/directories", s.handleGetDirectories)         // 获取监控目录列表
+		api.POST("/directories", s.handleAddDirectory)          // 添加监控目录
+		api.DELETE("/directories", s.handleRemoveDirectory)     // 删除监控目录
+		api.GET("/directories/browse", s.handleBrowseDirectory) // 新增：浏览目录
 		api.GET("/trash", s.handleGetTrash)
 		api.DELETE("/trash/:filename", s.handleDeleteTrash)
 		api.GET("/health", s.handleHealth)
@@ -168,11 +176,13 @@ func (s *Server) handleWorkerStatus(c *gin.Context) {
 	isWorking := s.worker.IsWorkingHours()
 	forceRun := s.worker.GetForceRun()
 	workerCount := s.worker.GetWorkerCount()
+	maxWorkers := s.worker.GetMaxWorkers()
 
 	c.JSON(http.StatusOK, gin.H{
 		"is_working_hours": isWorking,
 		"force_run":        forceRun,
 		"worker_count":     workerCount,
+		"max_workers":      maxWorkers,
 		"active":           forceRun || isWorking,
 		"mode":             s.getWorkerMode(),
 	})
@@ -188,6 +198,134 @@ func (s *Server) handleForceStart(c *gin.Context) {
 func (s *Server) handleForceStop(c *gin.Context) {
 	s.worker.SetForceRun(false)
 	c.JSON(http.StatusOK, gin.H{"message": "强制运行模式已关闭"})
+}
+
+// handleSetMaxWorkers 设置最大Worker数量
+func (s *Server) handleSetMaxWorkers(c *gin.Context) {
+	var req struct {
+		MaxWorkers int `json:"max_workers" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+
+	if req.MaxWorkers < 1 || req.MaxWorkers > 10 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Worker数量必须在1-10之间"})
+		return
+	}
+
+	s.worker.SetMaxWorkers(req.MaxWorkers)
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "最大Worker数量已更新",
+		"max_workers": req.MaxWorkers,
+	})
+}
+
+// handleGetDirectories 获取监控目录列表
+func (s *Server) handleGetDirectories(c *gin.Context) {
+	dirs := s.config.GetInputDirs()
+	c.JSON(http.StatusOK, gin.H{
+		"input_dirs": dirs,
+		"output_dir": s.config.Path.Output,
+	})
+}
+
+// handleAddDirectory 添加监控目录
+func (s *Server) handleAddDirectory(c *gin.Context) {
+	var req struct {
+		Directory string `json:"directory" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+
+	if err := s.config.AddInputDir(req.Directory); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "目录已添加",
+		"directory":  req.Directory,
+		"input_dirs": s.config.GetInputDirs(),
+	})
+}
+
+// handleRemoveDirectory 删除监控目录
+func (s *Server) handleRemoveDirectory(c *gin.Context) {
+	var req struct {
+		Directory string `json:"directory" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+
+	if err := s.config.RemoveInputDir(req.Directory); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "目录已删除",
+		"input_dirs": s.config.GetInputDirs(),
+	})
+}
+
+// handleBrowseDirectory 浏览目录（用于选择监控目录）
+func (s *Server) handleBrowseDirectory(c *gin.Context) {
+	path := c.Query("path")
+	if path == "" {
+		path = "/mnt" // 默认从 /mnt 开始浏览
+	}
+
+	// 安全检查：只允许浏览 /mnt 下的目录
+	if !strings.HasPrefix(path, "/mnt") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "只能浏览 /mnt 目录"})
+		return
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取目录失败: " + err.Error()})
+		return
+	}
+
+	type DirInfo struct {
+		Name  string `json:"name"`
+		Path  string `json:"path"`
+		IsDir bool   `json:"is_dir"`
+	}
+
+	var dirs []DirInfo
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue // 只返回目录
+		}
+
+		// 跳过隐藏目录
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		fullPath := filepath.Join(path, entry.Name())
+		dirs = append(dirs, DirInfo{
+			Name:  entry.Name(),
+			Path:  fullPath,
+			IsDir: true,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"current_path": path,
+		"parent_path":  filepath.Dir(path),
+		"directories":  dirs,
+	})
 }
 
 // handleGetTrash 获取垃圾桶文件列表

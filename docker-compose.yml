@@ -9,10 +9,8 @@ services:
     container_name: stm
 
     volumes:
-      # 源目录（根据实际情况修改）
-      - /mnt/pve/media/downloads:/input
-      # 目标目录（根据实际情况修改）
-      - /mnt/pve/media/archive:/output
+      # 直接映射整个 /mnt 目录，灵活访问所有挂载点
+      - /mnt:/mnt
       # 数据库和日志
       - ./data:/data
       # 配置文件（只读）

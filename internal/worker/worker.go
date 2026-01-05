@@ -24,10 +24,11 @@ type Worker struct {
 	config         *config.Config
 	db             *database.DB
 	forceRun       bool // 强制运行标志
+	maxWorkers     int  // 动态最大Worker数（可在运行时调整）
 	taskQueue      chan *database.Task
 	workerCount    int
 	wg             sync.WaitGroup
-	mu             sync.RWMutex // 保护 forceRun 和 workerCount
+	mu             sync.RWMutex // 保护 forceRun, maxWorkers 和 workerCount
 	workerCtx      context.Context
 	cancelWorkers  context.CancelFunc
 	workersStopped bool
@@ -38,6 +39,7 @@ func New(cfg *config.Config, db *database.DB) *Worker {
 	return &Worker{
 		config:         cfg,
 		db:             db,
+		maxWorkers:     cfg.System.MaxWorkers, // 从配置初始化
 		taskQueue:      make(chan *database.Task, cfg.System.TaskQueueSize),
 		workerCount:    0,
 		workersStopped: true,
@@ -106,6 +108,29 @@ func (w *Worker) GetWorkerCount() int {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.workerCount
+}
+
+// GetMaxWorkers 获取最大Worker数量
+func (w *Worker) GetMaxWorkers() int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.maxWorkers
+}
+
+// SetMaxWorkers 设置最大Worker数量（运行时动态调整）
+func (w *Worker) SetMaxWorkers(count int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if count < 1 {
+		count = 1
+	}
+	if count > 10 {
+		count = 10 // 安全上限
+	}
+
+	w.maxWorkers = count
+	log.Printf("[Worker] 最大Worker数量已调整为: %d", count)
 }
 
 // scheduler 任务调度器，定期从数据库获取任务
@@ -183,14 +208,16 @@ func (w *Worker) manageWorkerPool(ctx context.Context) {
 
 // getTargetWorkerCount 根据时间窗口和强制模式确定目标Worker数量
 func (w *Worker) getTargetWorkerCount() int {
+	maxWorkers := w.GetMaxWorkers() // 使用动态的maxWorkers
+
 	if w.GetForceRun() {
-		// 强制运行：使用配置的最大并发数
-		return w.config.System.MaxWorkers
+		// 强制运行：使用当前设置的最大并发数
+		return maxWorkers
 	}
 
 	if w.IsWorkingHours() {
-		// 工作时间：使用配置的最大并发数
-		return w.config.System.MaxWorkers
+		// 工作时间：使用当前设置的最大并发数
+		return maxWorkers
 	}
 
 	// 非工作时间：停止所有Worker

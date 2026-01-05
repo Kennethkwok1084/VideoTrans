@@ -44,18 +44,49 @@
 
     <!-- 主内容 -->
     <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- 监控目录管理卡片 -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-semibold text-gray-900">监控目录</h2>
+                <button id="btnAddDirectory"
+                    class="px-4 py-2 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 transition">
+                    + 添加目录
+                </button>
+            </div>
+            <div id="directoryList" class="space-y-2">
+                <p class="text-sm text-gray-500 text-center py-4">加载中...</p>
+            </div>
+            <div class="mt-4 pt-4 border-t border-gray-200">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm text-gray-600">输出目录:</span>
+                    <span id="outputDir" class="text-sm font-medium text-gray-900">-</span>
+                </div>
+            </div>
+        </div>
+
         <!-- Worker 状态卡片 -->
         <div class="bg-white rounded-lg shadow-md p-6 mb-6">
             <div class="flex items-center justify-between">
-                <div>
+                <div class="flex-1">
                     <h2 class="text-lg font-semibold text-gray-900 mb-2">Worker 状态</h2>
-                    <div class="flex items-center space-x-4">
+                    <div class="flex items-center space-x-6">
                         <div id="workerStatus" class="flex items-center">
                             <div id="statusIndicator" class="w-3 h-3 rounded-full mr-2 pulse-soft"></div>
                             <span id="statusText" class="text-sm font-medium">加载中...</span>
                         </div>
                         <div class="text-sm text-gray-600">
-                            <span id="workerCount">0</span> 个 Worker 运行中
+                            <span id="workerCount">0</span> / <span id="maxWorkers">3</span> 个 Worker 运行中
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <label class="text-sm text-gray-600">最大并发:</label>
+                            <button id="btnDecreaseWorker"
+                                class="w-8 h-8 bg-gray-200 hover:bg-gray-300 rounded text-gray-700 font-bold transition">-</button>
+                            <input id="inputMaxWorkers" type="number" min="1" max="10" value="3"
+                                class="w-16 px-2 py-1 border border-gray-300 rounded text-center">
+                            <button id="btnIncreaseWorker"
+                                class="w-8 h-8 bg-gray-200 hover:bg-gray-300 rounded text-gray-700 font-bold transition">+</button>
+                            <button id="btnApplyWorkers"
+                                class="px-3 py-1 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 transition">应用</button>
                         </div>
                     </div>
                 </div>
@@ -148,6 +179,191 @@
         // 全局状态
         let workerStatus = null;
 
+        // 加载监控目录列表
+        async function loadDirectories() {
+            try {
+                const res = await fetch('/api/directories');
+                const data = await res.json();
+
+                const listEl = document.getElementById('directoryList');
+                document.getElementById('outputDir').textContent = data.output_dir || '-';
+
+                if (!data.input_dirs || data.input_dirs.length === 0) {
+                    listEl.innerHTML = '<p class="text-sm text-gray-500 text-center py-4">暂无监控目录</p>';
+                    return;
+                }
+
+                listEl.innerHTML = data.input_dirs.map(dir => `
+                    <div class="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+                        <div class="flex items-center space-x-2">
+                            <span class="text-xl">📁</span>
+                            <span class="text-sm font-medium text-gray-900">${dir}</span>
+                        </div>
+                        <button onclick="removeDirectory('${dir}')" 
+                            class="px-3 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition">
+                            删除
+                        </button>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('加载目录列表失败:', err);
+            }
+        }
+
+        // 添加监控目录
+        async function addDirectory() {
+            // 显示目录浏览对话框
+            const modal = document.createElement('div');
+            modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+            modal.innerHTML = `
+                <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-2xl max-h-[80vh] flex flex-col">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-semibold">选择监控目录</h3>
+                        <button onclick="this.closest('.fixed').remove()" class="text-gray-500 hover:text-gray-700">✕</button>
+                    </div>
+                    <div class="mb-4">
+                        <div class="flex items-center space-x-2 text-sm text-gray-600 mb-2">
+                            <span>当前路径:</span>
+                            <span id="currentPath" class="font-mono bg-gray-100 px-2 py-1 rounded">/mnt</span>
+                        </div>
+                        <button id="btnParentDir" class="px-3 py-1 text-sm bg-gray-200 hover:bg-gray-300 rounded">↑ 上级目录</button>
+                    </div>
+                    <div id="dirBrowser" class="flex-1 overflow-y-auto border border-gray-200 rounded mb-4 p-2">
+                        <p class="text-center text-gray-500 py-8">加载中...</p>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button id="btnConfirmDir" class="flex-1 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">
+                            确定添加
+                        </button>
+                        <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 bg-gray-300 text-gray-700 rounded hover:bg-gray-400">
+                            取消
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            let currentPath = '/mnt';
+            let selectedPath = '';
+
+            async function browsePath(path) {
+                try {
+                    const res = await fetch(`/api/directories/browse?path=${encodeURIComponent(path)}`);
+                    const data = await res.json();
+
+                    if (!res.ok) {
+                        alert('浏览目录失败: ' + data.error);
+                        return;
+                    }
+
+                    currentPath = data.current_path;
+                    document.getElementById('currentPath').textContent = currentPath;
+
+                    const browser = document.getElementById('dirBrowser');
+                    if (!data.directories || data.directories.length === 0) {
+                        browser.innerHTML = '<p class="text-center text-gray-500 py-8">此目录下没有子目录</p>';
+                        return;
+                    }
+
+                    browser.innerHTML = data.directories.map(dir => `
+                        <div class="dir-item flex items-center justify-between p-2 hover:bg-gray-100 rounded cursor-pointer" data-path="${dir.path}">
+                            <div class="flex items-center space-x-2">
+                                <span class="text-xl">📁</span>
+                                <span class="text-sm font-medium">${dir.name}</span>
+                            </div>
+                            <div class="space-x-2">
+                                <button class="btn-browse px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200">浏览</button>
+                                <button class="btn-select px-2 py-1 text-xs bg-green-100 text-green-700 rounded hover:bg-green-200">选择</button>
+                            </div>
+                        </div>
+                    `).join('');
+
+                    // 绑定事件
+                    browser.querySelectorAll('.btn-browse').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const path = e.target.closest('.dir-item').dataset.path;
+                            browsePath(path);
+                        });
+                    });
+
+                    browser.querySelectorAll('.btn-select').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const path = e.target.closest('.dir-item').dataset.path;
+                            selectedPath = path;
+                            browser.querySelectorAll('.dir-item').forEach(item => item.classList.remove('bg-blue-50', 'border-2', 'border-blue-500'));
+                            e.target.closest('.dir-item').classList.add('bg-blue-50', 'border-2', 'border-blue-500');
+                        });
+                    });
+
+                } catch (err) {
+                    alert('浏览目录失败: ' + err.message);
+                }
+            }
+
+            // 上级目录按钮
+            document.getElementById('btnParentDir').addEventListener('click', () => {
+                if (currentPath !== '/mnt') {
+                    const parent = currentPath.split('/').slice(0, -1).join('/') || '/mnt';
+                    browsePath(parent);
+                }
+            });
+
+            // 确定按钮
+            document.getElementById('btnConfirmDir').addEventListener('click', async () => {
+                if (!selectedPath) {
+                    alert('请选择一个目录');
+                    return;
+                }
+
+                try {
+                    const res = await fetch('/api/directories', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ directory: selectedPath })
+                    });
+                    const data = await res.json();
+
+                    if (res.ok) {
+                        alert(`目录已添加: ${selectedPath}`);
+                        modal.remove();
+                        loadDirectories();
+                    } else {
+                        alert('添加失败: ' + data.error);
+                    }
+                } catch (err) {
+                    alert('操作失败: ' + err.message);
+                }
+            });
+
+            // 初始加载
+            browsePath('/mnt');
+        }
+
+        // 删除监控目录
+        async function removeDirectory(dir) {
+            if (!confirm(`确定要删除监控目录吗？\n${dir}`)) return;
+
+            try {
+                const res = await fetch('/api/directories', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ directory: dir })
+                });
+                const data = await res.json();
+
+                if (res.ok) {
+                    alert('目录已删除');
+                    loadDirectories();
+                } else {
+                    alert('删除失败: ' + data.error);
+                }
+            } catch (err) {
+                alert('操作失败: ' + err.message);
+            }
+        }
+
         // 加载统计数据
         async function loadStats() {
             try {
@@ -175,6 +391,8 @@
                 const btnForceStop = document.getElementById('btnForceStop');
 
                 document.getElementById('workerCount').textContent = workerStatus.worker_count || 0;
+                document.getElementById('maxWorkers').textContent = workerStatus.max_workers || 3;
+                document.getElementById('inputMaxWorkers').value = workerStatus.max_workers || 3;
                 statusText.textContent = workerStatus.mode;
 
                 // 更新状态指示器
@@ -270,6 +488,47 @@
             }
         });
 
+        // 添加目录按钮
+        document.getElementById('btnAddDirectory').addEventListener('click', addDirectory);
+
+        // Worker数量调整
+        document.getElementById('btnDecreaseWorker').addEventListener('click', () => {
+            const input = document.getElementById('inputMaxWorkers');
+            const val = parseInt(input.value) || 1;
+            if (val > 1) input.value = val - 1;
+        });
+
+        document.getElementById('btnIncreaseWorker').addEventListener('click', () => {
+            const input = document.getElementById('inputMaxWorkers');
+            const val = parseInt(input.value) || 1;
+            if (val < 10) input.value = val + 1;
+        });
+
+        document.getElementById('btnApplyWorkers').addEventListener('click', async () => {
+            const maxWorkers = parseInt(document.getElementById('inputMaxWorkers').value);
+            if (maxWorkers < 1 || maxWorkers > 10) {
+                alert('Worker数量必须在1-10之间');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/worker/set-max', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ max_workers: maxWorkers })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    alert(`最大Worker数量已更新为: ${maxWorkers}`);
+                    loadWorkerStatus();
+                } else {
+                    alert('设置失败: ' + data.error);
+                }
+            } catch (err) {
+                alert('操作失败: ' + err.message);
+            }
+        });
+
         // 重试任务
         async function retryTask(id) {
             try {
@@ -283,6 +542,7 @@
         }
 
         // 初始化
+        loadDirectories();
         loadStats();
         loadWorkerStatus();
         loadFailedTasks();

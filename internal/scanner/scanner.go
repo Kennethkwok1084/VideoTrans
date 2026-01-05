@@ -29,15 +29,38 @@ func New(cfg *config.Config, db *database.DB) *Scanner {
 
 // Scan 扫描输入目录并更新数据库
 func (s *Scanner) Scan(ctx context.Context) error {
-	log.Printf("[Scanner] 开始扫描目录: %s", s.config.Path.Input)
-	startTime := time.Now()
-	newCount := 0
-	updateCount := 0
-	skipCount := 0
+	inputDirs := s.config.GetInputDirs()
+	log.Printf("[Scanner] 开始扫描 %d 个目录", len(inputDirs))
 
-	err := filepath.WalkDir(s.config.Path.Input, func(path string, d fs.DirEntry, err error) error {
+	totalNew := 0
+	totalUpdate := 0
+	totalSkip := 0
+	startTime := time.Now()
+
+	for _, inputDir := range inputDirs {
+		log.Printf("[Scanner] 扫描目录: %s", inputDir)
+		newCount, updateCount, skipCount, err := s.scanDirectory(ctx, inputDir)
 		if err != nil {
-			log.Printf("[Scanner] 访问路径失败 %s: %v", path, err)
+			log.Printf("[Scanner] 扫描目录失败 %s: %v", inputDir, err)
+			continue
+		}
+		totalNew += newCount
+		totalUpdate += updateCount
+		totalSkip += skipCount
+	}
+
+	elapsed := time.Since(startTime)
+	log.Printf("[Scanner] 扫描完成，耗时: %v，新增: %d, 更新: %d, 跳过: %d",
+		elapsed, totalNew, totalUpdate, totalSkip)
+
+	return nil
+}
+
+// scanDirectory 扫描单个目录
+func (s *Scanner) scanDirectory(ctx context.Context, inputDir string) (newCount, updateCount, skipCount int, err error) {
+	err = filepath.WalkDir(inputDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			log.Printf("[Scanner] 访问路径失败 %s: %v", path, walkErr)
 			return nil // 继续扫描其他文件
 		}
 
@@ -75,15 +98,15 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			return nil
 		}
 
-		// 计算相对路径
-		relPath, err := filepath.Rel(s.config.Path.Input, path)
+		// 计算相对于输入目录的路径
+		relPath, err := filepath.Rel(inputDir, path)
 		if err != nil {
 			log.Printf("[Scanner] 计算相对路径失败 %s: %v", path, err)
 			return nil
 		}
 
 		// 处理文件
-		action := s.processFile(relPath, info.ModTime(), info.Size())
+		action := s.processFile(path, relPath, info.ModTime(), info.Size())
 		switch action {
 		case "new":
 			newCount++
@@ -96,42 +119,38 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		return nil
 	})
 
-	duration := time.Since(startTime)
-	log.Printf("[Scanner] 扫描完成: 新增=%d, 更新=%d, 跳过=%d, 耗时=%v",
-		newCount, updateCount, skipCount, duration)
-
-	return err
+	return
 }
 
 // processFile 处理单个文件
-func (s *Scanner) processFile(relPath string, mtime time.Time, size int64) string {
-	// 查询数据库中是否存在该文件
-	task, err := s.db.GetTaskByPath(relPath)
+func (s *Scanner) processFile(fullPath, relPath string, mtime time.Time, size int64) string {
+	// 查询数据库中是否存在该文件（使用完整路径）
+	task, err := s.db.GetTaskByPath(fullPath)
 	if err != nil {
-		log.Printf("[Scanner] 查询任务失败 %s: %v", relPath, err)
+		log.Printf("[Scanner] 查询任务失败 %s: %v", fullPath, err)
 		return "error"
 	}
 
 	// 情况1: 新文件
 	if task == nil {
 		newTask := &database.Task{
-			SourcePath:  relPath,
+			SourcePath:  fullPath,
 			SourceMtime: mtime,
 			SourceSize:  size,
 		}
 		if err := s.db.CreateTask(newTask); err != nil {
-			log.Printf("[Scanner] 创建任务失败 %s: %v", relPath, err)
+			log.Printf("[Scanner] 创建任务失败 %s: %v", fullPath, err)
 			return "error"
 		}
 		log.Printf("[Scanner] 新文件入库: %s (%.2f MB)",
-			relPath, float64(size)/1024/1024)
+			fullPath, float64(size)/1024/1024)
 		return "new"
 	}
 
 	// 情况2: 文件已更新（mtime或size变化）
 	if !task.SourceMtime.Equal(mtime) || task.SourceSize != size {
-		if err := s.db.ResetTaskToPending(relPath, mtime, size); err != nil {
-			log.Printf("[Scanner] 重置任务失败 %s: %v", relPath, err)
+		if err := s.db.ResetTaskToPending(fullPath, mtime, size); err != nil {
+			log.Printf("[Scanner] 重置任务失败 %s: %v", fullPath, err)
 			return "error"
 		}
 		log.Printf("[Scanner] 文件已更新，重置任务: %s", relPath)

@@ -30,10 +30,11 @@ type SystemConfig struct {
 
 // PathConfig 路径配置
 type PathConfig struct {
-	Input    string `yaml:"input"`    // 输入目录
-	Output   string `yaml:"output"`   // 输出目录
-	Trash    string `yaml:"trash"`    // 垃圾桶目录名
-	Database string `yaml:"database"` // 数据库文件路径
+	Input    string   `yaml:"input"`    // 默认输入目录（保持兼容性）
+	Inputs   []string `yaml:"inputs"`   // 多个输入目录（新增）
+	Output   string   `yaml:"output"`   // 输出目录
+	Trash    string   `yaml:"trash"`    // 垃圾桶目录名
+	Database string   `yaml:"database"` // 数据库文件路径
 }
 
 // FFmpegConfig FFmpeg配置
@@ -116,9 +117,15 @@ func (c *Config) Validate() error {
 	}
 
 	// 验证路径
-	if c.Path.Input == "" {
-		return fmt.Errorf("input 路径不能为空")
+	if c.Path.Input == "" && len(c.Path.Inputs) == 0 {
+		return fmt.Errorf("至少需要配置一个input路径")
 	}
+
+	// 兼容性处理：如果只配置了Input，将其添加到Inputs
+	if c.Path.Input != "" && len(c.Path.Inputs) == 0 {
+		c.Path.Inputs = []string{c.Path.Input}
+	}
+
 	if c.Path.Output == "" {
 		return fmt.Errorf("output 路径不能为空")
 	}
@@ -158,6 +165,60 @@ func (c *Config) applyEnvOverrides() {
 // GetTrashPath 获取完整的垃圾桶路径
 func (c *Config) GetTrashPath() string {
 	return filepath.Join(c.Path.Input, c.Path.Trash)
+}
+
+// GetInputDirs 获取所有输入目录
+func (c *Config) GetInputDirs() []string {
+	if len(c.Path.Inputs) > 0 {
+		return c.Path.Inputs
+	}
+	if c.Path.Input != "" {
+		return []string{c.Path.Input}
+	}
+	return []string{}
+}
+
+// AddInputDir 添加输入目录
+func (c *Config) AddInputDir(dir string) error {
+	// 检查目录是否已存在
+	for _, existing := range c.Path.Inputs {
+		if existing == dir {
+			return fmt.Errorf("目录已存在")
+		}
+	}
+
+	// 检查目录是否存在
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("目录不存在: %s", dir)
+	}
+
+	c.Path.Inputs = append(c.Path.Inputs, dir)
+	return nil
+}
+
+// RemoveInputDir 删除输入目录
+func (c *Config) RemoveInputDir(dir string) error {
+	newInputs := []string{}
+	found := false
+
+	for _, existing := range c.Path.Inputs {
+		if existing == dir {
+			found = true
+			continue
+		}
+		newInputs = append(newInputs, existing)
+	}
+
+	if !found {
+		return fmt.Errorf("目录不存在")
+	}
+
+	if len(newInputs) == 0 {
+		return fmt.Errorf("至少需要保留一个监控目录")
+	}
+
+	c.Path.Inputs = newInputs
+	return nil
 }
 
 // IsVideoFile 检查文件是否为支持的视频格式
