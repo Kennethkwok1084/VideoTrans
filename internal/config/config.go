@@ -226,6 +226,11 @@ func (c *Config) GetPairs() []InputOutputPair {
 
 // AddInputOutputPair 添加输入输出目录配对
 func (c *Config) AddInputOutputPair(inputDir, outputDir string) error {
+	// 检查输入输出目录不能相同
+	if inputDir == outputDir {
+		return fmt.Errorf("输入目录和输出目录不能相同: %s", inputDir)
+	}
+
 	// 检查输入目录是否已存在
 	for _, pair := range c.Path.Pairs {
 		if pair.Input == inputDir {

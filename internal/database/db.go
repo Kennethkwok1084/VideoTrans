@@ -173,6 +173,13 @@ func (db *DB) UpdateTaskOutputSize(id int64, size int64) error {
 	return err
 }
 
+// UpdateTaskPath 更新任务路径（用于迁移旧版本相对路径到新版本完整路径）
+func (db *DB) UpdateTaskPath(id int64, newPath string) error {
+	query := `UPDATE tasks SET source_path = ? WHERE id = ?`
+	_, err := db.conn.Exec(query, newPath, id)
+	return err
+}
+
 // GetPendingTasks 获取待处理任务
 func (db *DB) GetPendingTasks(limit int) ([]*Task, error) {
 	query := `

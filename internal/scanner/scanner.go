@@ -124,11 +124,30 @@ func (s *Scanner) scanDirectory(ctx context.Context, inputDir string, outputDir 
 
 // processFile 处理单个文件
 func (s *Scanner) processFile(fullPath, relPath, outputDir string, mtime time.Time, size int64) string {
-	// 查询数据库中是否存在该文件（使用完整路径）
+	// 查询数据库中是否存在该文件（先尝试完整路径）
 	task, err := s.db.GetTaskByPath(fullPath)
 	if err != nil {
 		log.Printf("[Scanner] 查询任务失败 %s: %v", fullPath, err)
 		return "error"
+	}
+
+	// 向后兼容：如果没有找到，尝试查询相对路径（旧版本数据）
+	if task == nil {
+		task, err = s.db.GetTaskByPath(relPath)
+		if err != nil {
+			log.Printf("[Scanner] 查询任务失败 %s: %v", relPath, err)
+			return "error"
+		}
+		// 如果找到了旧记录，更新为完整路径
+		if task != nil {
+			log.Printf("[Scanner] 发现旧版本记录，更新路径: %s -> %s", relPath, fullPath)
+			if err := s.db.UpdateTaskPath(task.ID, fullPath); err != nil {
+				log.Printf("[Scanner] 更新任务路径失败: %v", err)
+				return "error"
+			}
+			// 重新查询获取更新后的任务
+			task, _ = s.db.GetTaskByPath(fullPath)
+		}
 	}
 
 	// 情况1: 新文件
