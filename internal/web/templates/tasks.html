@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>任务列表 - STM 视频转码服务</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <!-- 导航栏 -->
+    <nav class="bg-white shadow-sm border-b border-gray-200">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <h1 class="text-2xl font-bold text-gray-900">📹 STM 转码服务</h1>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <a href="/" class="px-4 py-2 text-gray-600 hover:text-gray-900">仪表盘</a>
+                    <a href="/tasks" class="px-4 py-2 text-blue-600 font-semibold border-b-2 border-blue-600">任务列表</a>
+                    <a href="/trash" class="px-4 py-2 text-gray-600 hover:text-gray-900">垃圾桶</a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- 主内容 -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- 筛选器 -->
+        <div class="bg-white rounded-lg shadow-md p-4 mb-6">
+            <div class="flex items-center justify-between">
+                <div class="flex space-x-2">
+                    <button onclick="filterTasks('all')" id="btnAll" class="filter-btn active">
+                        全部
+                    </button>
+                    <button onclick="filterTasks('pending')" id="btnPending" class="filter-btn">
+                        待处理
+                    </button>
+                    <button onclick="filterTasks('processing')" id="btnProcessing" class="filter-btn">
+                        处理中
+                    </button>
+                    <button onclick="filterTasks('completed')" id="btnCompleted" class="filter-btn">
+                        已完成
+                    </button>
+                    <button onclick="filterTasks('failed')" id="btnFailed" class="filter-btn">
+                        失败
+                    </button>
+                </div>
+                <div class="text-sm text-gray-600">
+                    共 <span id="totalCount">0</span> 个任务
+                </div>
+            </div>
+        </div>
+
+        <!-- 任务表格 -->
+        <div class="bg-white rounded-lg shadow-md overflow-hidden">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            文件名
+                        </th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            状态
+                        </th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            进度
+                        </th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            大小变化
+                        </th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            创建时间
+                        </th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            操作
+                        </th>
+                    </tr>
+                </thead>
+                <tbody id="taskTableBody" class="bg-white divide-y divide-gray-200">
+                    <tr>
+                        <td colspan="6" class="px-6 py-12 text-center text-gray-500">
+                            加载中...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 分页 -->
+        <div class="mt-6 flex items-center justify-between">
+            <button id="btnPrev" onclick="prevPage()" 
+                    class="px-4 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                上一页
+            </button>
+            <div class="text-sm text-gray-700">
+                第 <span id="currentPage">1</span> 页
+            </div>
+            <button id="btnNext" onclick="nextPage()" 
+                    class="px-4 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                下一页
+            </button>
+        </div>
+    </main>
+
+    <style>
+        .filter-btn {
+            @apply px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition;
+        }
+        .filter-btn.active {
+            @apply bg-blue-600 text-white border-blue-600 hover:bg-blue-700;
+        }
+    </style>
+
+    <script>
+        let currentFilter = 'all';
+        let currentPage = 1;
+        const pageSize = 20;
+
+        // 获取状态徽章 HTML
+        function getStatusBadge(status) {
+            const badges = {
+                'pending': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800">待处理</span>',
+                'processing': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">处理中</span>',
+                'completed': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">已完成</span>',
+                'failed': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800">失败</span>'
+            };
+            return badges[status] || status;
+        }
+
+        // 格式化文件大小
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+        }
+
+        // 格式化时间
+        function formatTime(dateStr) {
+            if (!dateStr) return '-';
+            const date = new Date(dateStr);
+            return date.toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+
+        // 加载任务列表
+        async function loadTasks() {
+            try {
+                const filter = currentFilter === 'all' ? '' : currentFilter;
+                const res = await fetch(`/api/tasks?status=${filter}&page=${currentPage}&limit=${pageSize}`);
+                const tasks = await res.json();
+                
+                const tbody = document.getElementById('taskTableBody');
+                
+                if (tasks.length === 0) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="6" class="px-6 py-12 text-center text-gray-500">
+                                暂无任务
+                            </td>
+                        </tr>
+                    `;
+                    document.getElementById('btnNext').disabled = true;
+                    return;
+                }
+                
+                tbody.innerHTML = tasks.map(task => {
+                    const savedBytes = task.original_size - task.output_size;
+                    const savedPercent = task.original_size > 0 
+                        ? ((savedBytes / task.original_size) * 100).toFixed(1)
+                        : 0;
+                    
+                    return `
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-6 py-4">
+                                <div class="text-sm font-medium text-gray-900 max-w-md truncate" title="${task.source_path}">
+                                    ${task.source_path.split('/').pop()}
+                                </div>
+                                <div class="text-xs text-gray-500 mt-1">
+                                    ${task.source_path}
+                                </div>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                ${getStatusBadge(task.status)}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                ${task.status === 'processing' 
+                                    ? `<div class="w-full bg-gray-200 rounded-full h-2">
+                                         <div class="bg-blue-600 h-2 rounded-full" style="width: ${task.progress}%"></div>
+                                       </div>
+                                       <span class="text-xs text-gray-600 mt-1">${task.progress}%</span>`
+                                    : '-'}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                ${task.original_size > 0 
+                                    ? `<div class="text-sm text-gray-900">
+                                         ${formatSize(task.original_size)} → ${formatSize(task.output_size)}
+                                       </div>
+                                       <div class="text-xs text-green-600">
+                                         节省 ${savedPercent}%
+                                       </div>`
+                                    : '-'}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                ${formatTime(task.created_at)}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                ${task.status === 'failed' 
+                                    ? `<button onclick="retryTask(${task.id})" class="text-blue-600 hover:text-blue-900 mr-3">重试</button>`
+                                    : ''}
+                                <button onclick="deleteTask(${task.id})" class="text-red-600 hover:text-red-900">删除</button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+                
+                // 更新分页按钮
+                document.getElementById('btnPrev').disabled = currentPage === 1;
+                document.getElementById('btnNext').disabled = tasks.length < pageSize;
+                document.getElementById('currentPage').textContent = currentPage;
+                
+            } catch (err) {
+                console.error('加载任务失败:', err);
+            }
+        }
+
+        // 筛选任务
+        function filterTasks(status) {
+            currentFilter = status;
+            currentPage = 1;
+            
+            // 更新按钮样式
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            document.getElementById(`btn${status.charAt(0).toUpperCase() + status.slice(1)}`).classList.add('active');
+            
+            loadTasks();
+        }
+
+        // 上一页
+        function prevPage() {
+            if (currentPage > 1) {
+                currentPage--;
+                loadTasks();
+            }
+        }
+
+        // 下一页
+        function nextPage() {
+            currentPage++;
+            loadTasks();
+        }
+
+        // 重试任务
+        async function retryTask(id) {
+            if (!confirm('确定要重试此任务吗？')) return;
+            
+            try {
+                await fetch(`/api/tasks/${id}/retry`, { method: 'POST' });
+                alert('任务已重新加入队列');
+                loadTasks();
+            } catch (err) {
+                alert('重试失败: ' + err.message);
+            }
+        }
+
+        // 删除任务
+        async function deleteTask(id) {
+            if (!confirm('确定要删除此任务记录吗？此操作不可撤销。')) return;
+            
+            try {
+                await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+                alert('任务已删除');
+                loadTasks();
+            } catch (err) {
+                alert('删除失败: ' + err.message);
+            }
+        }
+
+        // 初始化
+        loadTasks();
+        
+        // 定期刷新（每 10 秒）
+        setInterval(loadTasks, 10000);
+    </script>
+</body>
+</html>

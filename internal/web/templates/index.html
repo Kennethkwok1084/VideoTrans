@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STM 视频转码服务 - 仪表盘</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes pulse-soft {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+        .pulse-soft { animation: pulse-soft 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <!-- 导航栏 -->
+    <nav class="bg-white shadow-sm border-b border-gray-200">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <h1 class="text-2xl font-bold text-gray-900">📹 STM 转码服务</h1>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <a href="/" class="px-4 py-2 text-blue-600 font-semibold border-b-2 border-blue-600">仪表盘</a>
+                    <a href="/tasks" class="px-4 py-2 text-gray-600 hover:text-gray-900">任务列表</a>
+                    <a href="/trash" class="px-4 py-2 text-gray-600 hover:text-gray-900">垃圾桶</a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- 主内容 -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Worker 状态卡片 -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h2 class="text-lg font-semibold text-gray-900 mb-2">Worker 状态</h2>
+                    <div class="flex items-center space-x-4">
+                        <div id="workerStatus" class="flex items-center">
+                            <div id="statusIndicator" class="w-3 h-3 rounded-full mr-2 pulse-soft"></div>
+                            <span id="statusText" class="text-sm font-medium">加载中...</span>
+                        </div>
+                        <div class="text-sm text-gray-600">
+                            <span id="workerCount">0</span> 个 Worker 运行中
+                        </div>
+                    </div>
+                </div>
+                <div class="flex space-x-2">
+                    <button id="btnScan" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition">
+                        扫描目录
+                    </button>
+                    <button id="btnForceStart" class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition hidden">
+                        强制启动
+                    </button>
+                    <button id="btnForceStop" class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition hidden">
+                        停止强制
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 统计卡片 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+            <!-- 待处理 -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm font-medium text-gray-600">待处理</p>
+                        <p id="statPending" class="text-3xl font-bold text-yellow-600 mt-2">-</p>
+                    </div>
+                    <div class="w-12 h-12 bg-yellow-100 rounded-full flex items-center justify-center">
+                        <span class="text-2xl">⏳</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 处理中 -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm font-medium text-gray-600">处理中</p>
+                        <p id="statProcessing" class="text-3xl font-bold text-blue-600 mt-2">-</p>
+                    </div>
+                    <div class="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                        <span class="text-2xl">⚙️</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 已完成 -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm font-medium text-gray-600">已完成</p>
+                        <p id="statCompleted" class="text-3xl font-bold text-green-600 mt-2">-</p>
+                    </div>
+                    <div class="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                        <span class="text-2xl">✅</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 节省空间 -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm font-medium text-gray-600">节省空间</p>
+                        <p id="statSaved" class="text-3xl font-bold text-purple-600 mt-2">-</p>
+                        <p class="text-xs text-gray-500 mt-1">GB</p>
+                    </div>
+                    <div class="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center">
+                        <span class="text-2xl">💾</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 失败任务列表 -->
+        <div class="bg-white rounded-lg shadow-md p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-semibold text-gray-900">失败任务</h2>
+                <span id="failedCount" class="text-sm text-red-600 font-medium">0 个任务</span>
+            </div>
+            <div id="failedTasks" class="space-y-3">
+                <p class="text-sm text-gray-500 text-center py-8">暂无失败任务</p>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // 全局状态
+        let workerStatus = null;
+
+        // 加载统计数据
+        async function loadStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+                
+                document.getElementById('statPending').textContent = data.pending || 0;
+                document.getElementById('statProcessing').textContent = data.processing || 0;
+                document.getElementById('statCompleted').textContent = data.completed || 0;
+                document.getElementById('statSaved').textContent = (data.saved_gb || 0).toFixed(2);
+            } catch (err) {
+                console.error('加载统计失败:', err);
+            }
+        }
+
+        // 加载 Worker 状态
+        async function loadWorkerStatus() {
+            try {
+                const res = await fetch('/api/worker/status');
+                workerStatus = await res.json();
+                
+                const indicator = document.getElementById('statusIndicator');
+                const statusText = document.getElementById('statusText');
+                const btnForceStart = document.getElementById('btnForceStart');
+                const btnForceStop = document.getElementById('btnForceStop');
+                
+                document.getElementById('workerCount').textContent = workerStatus.worker_count || 0;
+                statusText.textContent = workerStatus.mode;
+                
+                // 更新状态指示器
+                if (workerStatus.active) {
+                    indicator.className = 'w-3 h-3 rounded-full mr-2 bg-green-500 pulse-soft';
+                } else {
+                    indicator.className = 'w-3 h-3 rounded-full mr-2 bg-gray-400';
+                }
+                
+                // 显示/隐藏按钮
+                if (workerStatus.force_run) {
+                    btnForceStart.classList.add('hidden');
+                    btnForceStop.classList.remove('hidden');
+                } else {
+                    btnForceStart.classList.remove('hidden');
+                    btnForceStop.classList.add('hidden');
+                }
+            } catch (err) {
+                console.error('加载 Worker 状态失败:', err);
+            }
+        }
+
+        // 加载失败任务
+        async function loadFailedTasks() {
+            try {
+                const res = await fetch('/api/tasks?status=failed&limit=5');
+                const tasks = await res.json();
+                
+                const container = document.getElementById('failedTasks');
+                const countEl = document.getElementById('failedCount');
+                
+                if (tasks.length === 0) {
+                    container.innerHTML = '<p class="text-sm text-gray-500 text-center py-8">暂无失败任务</p>';
+                    countEl.textContent = '0 个任务';
+                    return;
+                }
+                
+                countEl.textContent = `${tasks.length} 个任务`;
+                container.innerHTML = tasks.map(task => `
+                    <div class="flex items-center justify-between p-3 bg-red-50 rounded-lg border border-red-200">
+                        <div class="flex-1 min-w-0">
+                            <p class="text-sm font-medium text-gray-900 truncate">${task.source_path}</p>
+                            <p class="text-xs text-red-600 mt-1">${task.error_message || '未知错误'}</p>
+                        </div>
+                        <button onclick="retryTask(${task.id})" 
+                                class="ml-4 px-3 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700 transition">
+                            重试
+                        </button>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('加载失败任务失败:', err);
+            }
+        }
+
+        // 扫描目录
+        document.getElementById('btnScan').addEventListener('click', async () => {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '扫描中...';
+            
+            try {
+                await fetch('/api/scan', { method: 'POST' });
+                alert('扫描任务已启动');
+                setTimeout(loadStats, 2000);
+            } catch (err) {
+                alert('扫描失败: ' + err.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '扫描目录';
+            }
+        });
+
+        // 强制启动
+        document.getElementById('btnForceStart').addEventListener('click', async () => {
+            try {
+                await fetch('/api/worker/force-start', { method: 'POST' });
+                alert('已切换到强制运行模式');
+                loadWorkerStatus();
+            } catch (err) {
+                alert('操作失败: ' + err.message);
+            }
+        });
+
+        // 停止强制
+        document.getElementById('btnForceStop').addEventListener('click', async () => {
+            try {
+                await fetch('/api/worker/force-stop', { method: 'POST' });
+                alert('已停止强制运行模式');
+                loadWorkerStatus();
+            } catch (err) {
+                alert('操作失败: ' + err.message);
+            }
+        });
+
+        // 重试任务
+        async function retryTask(id) {
+            try {
+                await fetch(`/api/tasks/${id}/retry`, { method: 'POST' });
+                alert('任务已重新加入队列');
+                loadStats();
+                loadFailedTasks();
+            } catch (err) {
+                alert('重试失败: ' + err.message);
+            }
+        }
+
+        // 初始化
+        loadStats();
+        loadWorkerStatus();
+        loadFailedTasks();
+
+        // 定期刷新（每 5 秒）
+        setInterval(() => {
+            loadStats();
+            loadWorkerStatus();
+            loadFailedTasks();
+        }, 5000);
+    </script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+system:
+  cron_start: 2
+  cron_end: 8
+  max_workers: 3  # Ryzen 3500X 建议设为 3
+  scan_interval: 10  # 扫描间隔（分钟）
+  scheduler_interval: 10  # 调度器检查间隔（秒）
+  task_queue_size: 10  # 任务队列容量
+  min_disk_space_gb: 5  # 最小磁盘空间要求（GB）
+
+path:
+  input: "/input"
+  output: "/output"
+  trash: ".stm_trash"  # 相对路径，实际在 /input/.stm_trash
+  database: "/data/tasks.db"
+
+ffmpeg:
+  codec: "libx264"
+  preset: "veryslow"
+  crf: 28
+  audio: "aac"
+  audio_bitrate: "128k"
+  extensions: [".mp4", ".mkv", ".avi", ".ts", ".mov", ".flv", ".wmv", ".m4v", ".webm"]
+  # 排除规则（支持通配符）
+  exclude_patterns:
+    - "SYNOPHOTO_*"           # 群晖缩略图/视频
+    - "@eaDir/*"               # 群晖索引目录
+    - "#recycle/*"             # 群晖回收站
+    - ".*"                     # 隐藏文件
+    - "*.tmp"                  # 临时文件
+    - "*.part"                 # 未完成的下载
+
+cleaning:
+  soft_delete_days: 7   # 移入垃圾桶天数
+  hard_delete_days: 30  # 彻底删除天数
+
+log:
+  level: "info"  # debug, info, warn, error
+  file: "/data/stm.log"

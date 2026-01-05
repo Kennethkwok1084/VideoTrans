@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  stm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: stm-transcoder:latest
+    container_name: stm
+    
+    volumes:
+      # 源目录（根据实际情况修改）
+      - /mnt/pve/media/downloads:/input
+      # 目标目录（根据实际情况修改）
+      - /mnt/pve/media/archive:/output
+      # 数据库和日志
+      - ./data:/data
+      # 配置文件（只读）
+      - ./configs/config.yaml:/app/config.yaml:ro
+    
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Shanghai
+      # 环境变量覆盖配置（可选）
+      # - STM_MAX_WORKERS=3
+    
+    ports:
+      - "8080:8080"
+    
+    restart: unless-stopped
+    
+    # 资源限制（可选，根据硬件调整）
+    deploy:
+      resources:
+        limits:
+          cpus: '6'        # 3500X 6核心
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 1G
