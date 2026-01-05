@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -146,16 +147,19 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// 验证数据库路径
-	if c.Path.Database == "" {
-		return fmt.Errorf("database 路径不能为空")
+	// 验证转换后的Pairs
+	for i, pair := range c.Path.Pairs {
+		if pair.Input == "" {
+			return fmt.Errorf("第%d个配对的输入路径不能为空", i+1)
+		}
+		if pair.Output == "" {
+			return fmt.Errorf("第%d个配对的输出路径不能为空", i+1)
+		}
+		if pair.Input == pair.Output {
+			return fmt.Errorf("第%d个配对的输入和输出目录不能相同: %s", i+1, pair.Input)
+		}
 	}
-
-	// 验证FFmpeg参数
-	if c.FFmpeg.CRF < 0 || c.FFmpeg.CRF > 51 {
-		return fmt.Errorf("crf 必须在 0-51 之间")
-	}
-
+	
 	// 验证清理天数
 	if c.Cleaning.SoftDeleteDays < 0 {
 		return fmt.Errorf("soft_delete_days 不能为负数")
@@ -194,10 +198,17 @@ func (c *Config) GetInputDirs() []string {
 	return dirs
 }
 
-// GetOutputDir 获取指定输入目录对应的输出目录
-func (c *Config) GetOutputDir(inputDir string) string {
+// GetOutputDir 根据输入目录或文件路径获取对应的输出目录
+// 参数可以是目录路径或文件路径，会自动查找匹配的输入目录配对
+func (c *Config) GetOutputDir(path string) string {
+	// 遍历所有配对，检查路径是否在某个输入目录下
 	for _, pair := range c.Path.Pairs {
-		if pair.Input == inputDir {
+		// 精确匹配目录
+		if pair.Input == path {
+			return pair.Output
+		}
+		// 检查路径是否在该输入目录下
+		if rel, err := filepath.Rel(pair.Input, path); err == nil && !strings.HasPrefix(rel, "..") {
 			return pair.Output
 		}
 	}

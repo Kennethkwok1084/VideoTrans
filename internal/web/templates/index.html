@@ -339,9 +339,13 @@
                                 document.getElementById('selectedOutputDir').textContent = path;
                                 document.getElementById('selectedOutputDir').classList.add('font-semibold');
                             } else {
-                                // 两个都已选择，替换输出目录
-                                selectedOutputPath = path;
-                                document.getElementById('selectedOutputDir').textContent = path;
+                                // 两个都已选择，重置为选择新的输入目录
+                                selectedInputPath = path;
+                                selectedOutputPath = '';
+                                document.getElementById('selectedInputDir').textContent = path;
+                                document.getElementById('selectedInputDir').classList.add('font-semibold');
+                                document.getElementById('selectedOutputDir').textContent = '未选择';
+                                document.getElementById('selectedOutputDir').classList.remove('font-semibold');
                             }
 
                             updateSelectHint();

@@ -316,29 +316,26 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 			} else {
 				log.Printf("[Worker-%d] 转码成功 #%d: %s", workerID, task.ID, task.SourcePath)
 
-				// 更新输出文件大小 - 需要计算实际的输出路径
-				outputDir := w.config.GetOutputDir(task.SourcePath)
-				if outputDir != "" {
-					// 找到相对路径
-					var relPath string
-					pairs := w.config.GetPairs()
-					for _, pair := range pairs {
-						if rel, err := filepath.Rel(pair.Input, task.SourcePath); err == nil && !strings.HasPrefix(rel, "..") {
-							relPath = rel
-							break
-						}
+				// 更新输出文件大小 - 单次遍历获取输出路径
+				var outputDir, relPath string
+				pairs := w.config.GetPairs()
+				for _, pair := range pairs {
+					if rel, err := filepath.Rel(pair.Input, task.SourcePath); err == nil && !strings.HasPrefix(rel, "..") {
+						outputDir = pair.Output
+						relPath = rel
+						break
 					}
+				}
 
-					if relPath != "" {
-						outputPath := filepath.Join(outputDir, relPath)
-						if info, err := os.Stat(outputPath); err == nil {
-							w.db.UpdateTaskOutputSize(task.ID, info.Size())
+				if outputDir != "" && relPath != "" {
+					outputPath := filepath.Join(outputDir, relPath)
+					if info, err := os.Stat(outputPath); err == nil {
+						w.db.UpdateTaskOutputSize(task.ID, info.Size())
 
-							// 计算节省的空间
-							if task.SourceSize > 0 {
-								savedBytes := task.SourceSize - info.Size()
-								metrics.SpaceSaved.Add(float64(savedBytes))
-							}
+						// 计算节省的空间
+						if task.SourceSize > 0 {
+							savedBytes := task.SourceSize - info.Size()
+							metrics.SpaceSaved.Add(float64(savedBytes))
 						}
 					}
 				}
@@ -362,24 +359,22 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 	// 源文件的完整路径就是task.SourcePath
 	inputPath := task.SourcePath
 
-	// 根据源文件路径找到对应的输出目录
-	outputDir := w.config.GetOutputDir(inputPath)
-	if outputDir == "" {
-		return fmt.Errorf("无法找到源文件对应的输出目录: %s", inputPath)
-	}
-
-	// 找到源文件所在的输入目录，计算相对路径
-	var relPath string
+	// 单次遍历找到匹配的输入目录，同时获取输出目录和相对路径
+	var (
+		outputDir string
+		relPath   string
+	)
 	pairs := w.config.GetPairs()
 	for _, pair := range pairs {
 		if rel, err := filepath.Rel(pair.Input, inputPath); err == nil && !strings.HasPrefix(rel, "..") {
+			outputDir = pair.Output
 			relPath = rel
 			break
 		}
 	}
 
-	if relPath == "" {
-		return fmt.Errorf("无法确定源文件的相对路径: %s", inputPath)
+	if outputDir == "" || relPath == "" {
+		return fmt.Errorf("无法找到源文件对应的输入输出配对: %s", inputPath)
 	}
 
 	// 构建输出路径（保持目录结构）

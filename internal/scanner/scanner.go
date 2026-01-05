@@ -159,14 +159,15 @@ func (s *Scanner) processFile(fullPath, relPath, outputDir string, mtime time.Ti
 
 	// 情况3: 已完成且目标文件存在
 	if task.Status == database.StatusCompleted {
-		targetPath := filepath.Join(s.config.Path.Output, relPath)
+		// 使用配对的输出目录而非全局配置
+		targetPath := filepath.Join(outputDir, relPath)
 		if _, err := os.Stat(targetPath); err == nil {
 			return "skip"
 		}
 		// 目标文件不存在，重置任务
 		log.Printf("[Scanner] 目标文件丢失，重置任务: %s", relPath)
-		if err := s.db.ResetTaskToPending(relPath, mtime, size); err != nil {
-			log.Printf("[Scanner] 重置任务失败 %s: %v", relPath, err)
+		if err := s.db.ResetTaskToPending(fullPath, mtime, size); err != nil {
+			log.Printf("[Scanner] 重置任务失败 %s: %v", fullPath, err)
 			return "error"
 		}
 		return "update"
