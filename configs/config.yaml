@@ -8,9 +8,9 @@ system:
   min_disk_space_gb: 5  # 最小磁盘空间要求（GB）
 
 path:
-  input: "/input"
-  output: "/output"
-  trash: ".stm_trash"  # 相对路径，实际在 /input/.stm_trash
+  input: "/mnt/pve/media/downloads"  # 默认监控目录（可在Web界面添加更多）
+  output: "/mnt/pve/media/archive"   # 输出目录
+  trash: ".stm_trash"  # 相对路径，实际在各监控目录下的 .stm_trash
   database: "/data/tasks.db"
 
 ffmpeg:
