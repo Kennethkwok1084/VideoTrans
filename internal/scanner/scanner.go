@@ -31,12 +31,12 @@ func New(cfg *config.Config, db *database.DB) *Scanner {
 func (s *Scanner) Scan(ctx context.Context) error {
 	inputDirs := s.config.GetInputDirs()
 	log.Printf("[Scanner] 开始扫描 %d 个目录", len(inputDirs))
-	
+
 	totalNew := 0
 	totalUpdate := 0
 	totalSkip := 0
 	startTime := time.Now()
-	
+
 	for _, inputDir := range inputDirs {
 		log.Printf("[Scanner] 扫描目录: %s", inputDir)
 		newCount, updateCount, skipCount, err := s.scanDirectory(ctx, inputDir)
@@ -48,11 +48,11 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		totalUpdate += updateCount
 		totalSkip += skipCount
 	}
-	
+
 	elapsed := time.Since(startTime)
 	log.Printf("[Scanner] 扫描完成，耗时: %v，新增: %d, 更新: %d, 跳过: %d",
 		elapsed, totalNew, totalUpdate, totalSkip)
-	
+
 	return nil
 }
 
@@ -118,7 +118,7 @@ func (s *Scanner) scanDirectory(ctx context.Context, inputDir string) (newCount,
 
 		return nil
 	})
-	
+
 	return
 }
 

@@ -120,12 +120,12 @@ func (c *Config) Validate() error {
 	if c.Path.Input == "" && len(c.Path.Inputs) == 0 {
 		return fmt.Errorf("至少需要配置一个input路径")
 	}
-	
+
 	// 兼容性处理：如果只配置了Input，将其添加到Inputs
 	if c.Path.Input != "" && len(c.Path.Inputs) == 0 {
 		c.Path.Inputs = []string{c.Path.Input}
 	}
-	
+
 	if c.Path.Output == "" {
 		return fmt.Errorf("output 路径不能为空")
 	}
@@ -186,12 +186,12 @@ func (c *Config) AddInputDir(dir string) error {
 			return fmt.Errorf("目录已存在")
 		}
 	}
-	
+
 	// 检查目录是否存在
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("目录不存在: %s", dir)
 	}
-	
+
 	c.Path.Inputs = append(c.Path.Inputs, dir)
 	return nil
 }
@@ -200,7 +200,7 @@ func (c *Config) AddInputDir(dir string) error {
 func (c *Config) RemoveInputDir(dir string) error {
 	newInputs := []string{}
 	found := false
-	
+
 	for _, existing := range c.Path.Inputs {
 		if existing == dir {
 			found = true
@@ -208,15 +208,15 @@ func (c *Config) RemoveInputDir(dir string) error {
 		}
 		newInputs = append(newInputs, existing)
 	}
-	
+
 	if !found {
 		return fmt.Errorf("目录不存在")
 	}
-	
+
 	if len(newInputs) == 0 {
 		return fmt.Errorf("至少需要保留一个监控目录")
 	}
-	
+
 	c.Path.Inputs = newInputs
 	return nil
 }

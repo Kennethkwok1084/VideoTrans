@@ -65,9 +65,9 @@ func (s *Server) setupRoutes() {
 		api.POST("/worker/force-start", s.handleForceStart)
 		api.POST("/worker/force-stop", s.handleForceStop)
 		api.POST("/worker/set-max", s.handleSetMaxWorkers)
-		api.GET("/directories", s.handleGetDirectories)       // 获取监控目录列表
-		api.POST("/directories", s.handleAddDirectory)        // 添加监控目录
-		api.DELETE("/directories", s.handleRemoveDirectory)   // 删除监控目录
+		api.GET("/directories", s.handleGetDirectories)         // 获取监控目录列表
+		api.POST("/directories", s.handleAddDirectory)          // 添加监控目录
+		api.DELETE("/directories", s.handleRemoveDirectory)     // 删除监控目录
 		api.GET("/directories/browse", s.handleBrowseDirectory) // 新增：浏览目录
 		api.GET("/trash", s.handleGetTrash)
 		api.DELETE("/trash/:filename", s.handleDeleteTrash)
@@ -307,7 +307,7 @@ func (s *Server) handleBrowseDirectory(c *gin.Context) {
 		if !entry.IsDir() {
 			continue // 只返回目录
 		}
-		
+
 		// 跳过隐藏目录
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue

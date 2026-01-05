@@ -184,15 +184,15 @@
             try {
                 const res = await fetch('/api/directories');
                 const data = await res.json();
-                
+
                 const listEl = document.getElementById('directoryList');
                 document.getElementById('outputDir').textContent = data.output_dir || '-';
-                
+
                 if (!data.input_dirs || data.input_dirs.length === 0) {
                     listEl.innerHTML = '<p class="text-sm text-gray-500 text-center py-4">暂无监控目录</p>';
                     return;
                 }
-                
+
                 listEl.innerHTML = data.input_dirs.map(dir => `
                     <div class="flex items-center justify-between p-3 bg-gray-50 rounded-md">
                         <div class="flex items-center space-x-2">
@@ -242,29 +242,29 @@
                 </div>
             `;
             document.body.appendChild(modal);
-            
+
             let currentPath = '/mnt';
             let selectedPath = '';
-            
+
             async function browsePath(path) {
                 try {
                     const res = await fetch(`/api/directories/browse?path=${encodeURIComponent(path)}`);
                     const data = await res.json();
-                    
+
                     if (!res.ok) {
                         alert('浏览目录失败: ' + data.error);
                         return;
                     }
-                    
+
                     currentPath = data.current_path;
                     document.getElementById('currentPath').textContent = currentPath;
-                    
+
                     const browser = document.getElementById('dirBrowser');
                     if (!data.directories || data.directories.length === 0) {
                         browser.innerHTML = '<p class="text-center text-gray-500 py-8">此目录下没有子目录</p>';
                         return;
                     }
-                    
+
                     browser.innerHTML = data.directories.map(dir => `
                         <div class="dir-item flex items-center justify-between p-2 hover:bg-gray-100 rounded cursor-pointer" data-path="${dir.path}">
                             <div class="flex items-center space-x-2">
@@ -277,7 +277,7 @@
                             </div>
                         </div>
                     `).join('');
-                    
+
                     // 绑定事件
                     browser.querySelectorAll('.btn-browse').forEach(btn => {
                         btn.addEventListener('click', (e) => {
@@ -286,7 +286,7 @@
                             browsePath(path);
                         });
                     });
-                    
+
                     browser.querySelectorAll('.btn-select').forEach(btn => {
                         btn.addEventListener('click', (e) => {
                             e.stopPropagation();
@@ -296,12 +296,12 @@
                             e.target.closest('.dir-item').classList.add('bg-blue-50', 'border-2', 'border-blue-500');
                         });
                     });
-                    
+
                 } catch (err) {
                     alert('浏览目录失败: ' + err.message);
                 }
             }
-            
+
             // 上级目录按钮
             document.getElementById('btnParentDir').addEventListener('click', () => {
                 if (currentPath !== '/mnt') {
@@ -309,14 +309,14 @@
                     browsePath(parent);
                 }
             });
-            
+
             // 确定按钮
             document.getElementById('btnConfirmDir').addEventListener('click', async () => {
                 if (!selectedPath) {
                     alert('请选择一个目录');
                     return;
                 }
-                
+
                 try {
                     const res = await fetch('/api/directories', {
                         method: 'POST',
@@ -324,7 +324,7 @@
                         body: JSON.stringify({ directory: selectedPath })
                     });
                     const data = await res.json();
-                    
+
                     if (res.ok) {
                         alert(`目录已添加: ${selectedPath}`);
                         modal.remove();
@@ -336,7 +336,7 @@
                     alert('操作失败: ' + err.message);
                 }
             });
-            
+
             // 初始加载
             browsePath('/mnt');
         }
@@ -344,7 +344,7 @@
         // 删除监控目录
         async function removeDirectory(dir) {
             if (!confirm(`确定要删除监控目录吗？\n${dir}`)) return;
-            
+
             try {
                 const res = await fetch('/api/directories', {
                     method: 'DELETE',
@@ -352,7 +352,7 @@
                     body: JSON.stringify({ directory: dir })
                 });
                 const data = await res.json();
-                
+
                 if (res.ok) {
                     alert('目录已删除');
                     loadDirectories();
