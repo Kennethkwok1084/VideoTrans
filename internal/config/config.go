@@ -159,7 +159,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("第%d个配对的输入和输出目录不能相同: %s", i+1, pair.Input)
 		}
 	}
-	
+
 	// 验证清理天数
 	if c.Cleaning.SoftDeleteDays < 0 {
 		return fmt.Errorf("soft_delete_days 不能为负数")
