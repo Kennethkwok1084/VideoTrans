@@ -225,17 +225,17 @@ func (s *Server) handleSetMaxWorkers(c *gin.Context) {
 
 // handleGetDirectories 获取监控目录列表
 func (s *Server) handleGetDirectories(c *gin.Context) {
-	dirs := s.config.GetInputDirs()
+	pairs := s.config.GetPairs()
 	c.JSON(http.StatusOK, gin.H{
-		"input_dirs": dirs,
-		"output_dir": s.config.Path.Output,
+		"pairs": pairs,
 	})
 }
 
-// handleAddDirectory 添加监控目录
+// handleAddDirectory 添加监控目录配对
 func (s *Server) handleAddDirectory(c *gin.Context) {
 	var req struct {
-		Directory string `json:"directory" binding:"required"`
+		InputDir  string `json:"input_dir" binding:"required"`
+		OutputDir string `json:"output_dir" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -243,22 +243,23 @@ func (s *Server) handleAddDirectory(c *gin.Context) {
 		return
 	}
 
-	if err := s.config.AddInputDir(req.Directory); err != nil {
+	if err := s.config.AddInputOutputPair(req.InputDir, req.OutputDir); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":    "目录已添加",
-		"directory":  req.Directory,
-		"input_dirs": s.config.GetInputDirs(),
+		"message":    "目录配对已添加",
+		"input_dir":  req.InputDir,
+		"output_dir": req.OutputDir,
+		"pairs":      s.config.GetPairs(),
 	})
 }
 
-// handleRemoveDirectory 删除监控目录
+// handleRemoveDirectory 删除监控目录配对
 func (s *Server) handleRemoveDirectory(c *gin.Context) {
 	var req struct {
-		Directory string `json:"directory" binding:"required"`
+		InputDir string `json:"input_dir" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -266,14 +267,14 @@ func (s *Server) handleRemoveDirectory(c *gin.Context) {
 		return
 	}
 
-	if err := s.config.RemoveInputDir(req.Directory); err != nil {
+	if err := s.config.RemoveInputOutputPair(req.InputDir); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":    "目录已删除",
-		"input_dirs": s.config.GetInputDirs(),
+		"message": "目录配对已删除",
+		"pairs":   s.config.GetPairs(),
 	})
 }
 

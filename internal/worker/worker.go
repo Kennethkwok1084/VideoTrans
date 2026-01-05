@@ -316,15 +316,27 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 			} else {
 				log.Printf("[Worker-%d] 转码成功 #%d: %s", workerID, task.ID, task.SourcePath)
 
-				// 更新输出文件大小
-				outputPath := filepath.Join(w.config.Path.Output, task.SourcePath)
-				if info, err := os.Stat(outputPath); err == nil {
-					w.db.UpdateTaskOutputSize(task.ID, info.Size())
+				// 更新输出文件大小 - 单次遍历获取输出路径
+				var outputDir, relPath string
+				pairs := w.config.GetPairs()
+				for _, pair := range pairs {
+					if rel, err := filepath.Rel(pair.Input, task.SourcePath); err == nil && !strings.HasPrefix(rel, "..") {
+						outputDir = pair.Output
+						relPath = rel
+						break
+					}
+				}
 
-					// 计算节省的空间
-					if task.SourceSize > 0 {
-						savedBytes := task.SourceSize - info.Size()
-						metrics.SpaceSaved.Add(float64(savedBytes))
+				if outputDir != "" && relPath != "" {
+					outputPath := filepath.Join(outputDir, relPath)
+					if info, err := os.Stat(outputPath); err == nil {
+						w.db.UpdateTaskOutputSize(task.ID, info.Size())
+
+						// 计算节省的空间
+						if task.SourceSize > 0 {
+							savedBytes := task.SourceSize - info.Size()
+							metrics.SpaceSaved.Add(float64(savedBytes))
+						}
 					}
 				}
 
@@ -344,18 +356,38 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 
 // transcode 执行FFmpeg转码
 func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID int) error {
-	// 构建输入和输出路径
-	inputPath := filepath.Join(w.config.Path.Input, task.SourcePath)
-	outputPath := filepath.Join(w.config.Path.Output, task.SourcePath)
+	// 源文件的完整路径就是task.SourcePath
+	inputPath := task.SourcePath
+
+	// 单次遍历找到匹配的输入目录，同时获取输出目录和相对路径
+	var (
+		outputDir string
+		relPath   string
+	)
+	pairs := w.config.GetPairs()
+	for _, pair := range pairs {
+		if rel, err := filepath.Rel(pair.Input, inputPath); err == nil && !strings.HasPrefix(rel, "..") {
+			outputDir = pair.Output
+			relPath = rel
+			break
+		}
+	}
+
+	if outputDir == "" || relPath == "" {
+		return fmt.Errorf("无法找到源文件对应的输入输出配对: %s", inputPath)
+	}
+
+	// 构建输出路径（保持目录结构）
+	outputPath := filepath.Join(outputDir, relPath)
 
 	// 确保输出目录存在
-	outputDir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	outputPathDir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(outputPathDir, 0755); err != nil {
 		return fmt.Errorf("创建输出目录失败: %w", err)
 	}
 
 	// 检查磁盘空间
-	if err := w.checkDiskSpace(outputDir); err != nil {
+	if err := w.checkDiskSpace(outputPathDir); err != nil {
 		return fmt.Errorf("磁盘空间检查失败: %w", err)
 	}
 
