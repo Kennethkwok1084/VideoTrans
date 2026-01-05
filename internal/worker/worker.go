@@ -316,15 +316,30 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 			} else {
 				log.Printf("[Worker-%d] 转码成功 #%d: %s", workerID, task.ID, task.SourcePath)
 
-				// 更新输出文件大小
-				outputPath := filepath.Join(w.config.Path.Output, task.SourcePath)
-				if info, err := os.Stat(outputPath); err == nil {
-					w.db.UpdateTaskOutputSize(task.ID, info.Size())
+				// 更新输出文件大小 - 需要计算实际的输出路径
+				outputDir := w.config.GetOutputDir(task.SourcePath)
+				if outputDir != "" {
+					// 找到相对路径
+					var relPath string
+					pairs := w.config.GetPairs()
+					for _, pair := range pairs {
+						if rel, err := filepath.Rel(pair.Input, task.SourcePath); err == nil && !strings.HasPrefix(rel, "..") {
+							relPath = rel
+							break
+						}
+					}
 
-					// 计算节省的空间
-					if task.SourceSize > 0 {
-						savedBytes := task.SourceSize - info.Size()
-						metrics.SpaceSaved.Add(float64(savedBytes))
+					if relPath != "" {
+						outputPath := filepath.Join(outputDir, relPath)
+						if info, err := os.Stat(outputPath); err == nil {
+							w.db.UpdateTaskOutputSize(task.ID, info.Size())
+
+							// 计算节省的空间
+							if task.SourceSize > 0 {
+								savedBytes := task.SourceSize - info.Size()
+								metrics.SpaceSaved.Add(float64(savedBytes))
+							}
+						}
 					}
 				}
 
@@ -344,18 +359,40 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 
 // transcode 执行FFmpeg转码
 func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID int) error {
-	// 构建输入和输出路径
-	inputPath := filepath.Join(w.config.Path.Input, task.SourcePath)
-	outputPath := filepath.Join(w.config.Path.Output, task.SourcePath)
+	// 源文件的完整路径就是task.SourcePath
+	inputPath := task.SourcePath
+
+	// 根据源文件路径找到对应的输出目录
+	outputDir := w.config.GetOutputDir(inputPath)
+	if outputDir == "" {
+		return fmt.Errorf("无法找到源文件对应的输出目录: %s", inputPath)
+	}
+
+	// 找到源文件所在的输入目录，计算相对路径
+	var relPath string
+	pairs := w.config.GetPairs()
+	for _, pair := range pairs {
+		if rel, err := filepath.Rel(pair.Input, inputPath); err == nil && !strings.HasPrefix(rel, "..") {
+			relPath = rel
+			break
+		}
+	}
+
+	if relPath == "" {
+		return fmt.Errorf("无法确定源文件的相对路径: %s", inputPath)
+	}
+
+	// 构建输出路径（保持目录结构）
+	outputPath := filepath.Join(outputDir, relPath)
 
 	// 确保输出目录存在
-	outputDir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	outputPathDir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(outputPathDir, 0755); err != nil {
 		return fmt.Errorf("创建输出目录失败: %w", err)
 	}
 
 	// 检查磁盘空间
-	if err := w.checkDiskSpace(outputDir); err != nil {
+	if err := w.checkDiskSpace(outputPathDir); err != nil {
 		return fmt.Errorf("磁盘空间检查失败: %w", err)
 	}
 

@@ -25,8 +25,10 @@ func setupTestScanner(t *testing.T) (*Scanner, *database.DB, string) {
 	cfg := &config.Config{
 		System: config.SystemConfig{ScanInterval: 10},
 		Path: config.PathConfig{
-			Input:    inputDir,
-			Output:   outputDir,
+			Pairs: []config.InputOutputPair{{
+				Input:  inputDir,
+				Output: outputDir,
+			}},
 			Database: dbPath,
 		},
 		FFmpeg: config.FFmpegConfig{
@@ -104,8 +106,8 @@ func TestScanNewFile(t *testing.T) {
 		t.Fatalf("扫描失败: %v", err)
 	}
 
-	// 验证任务已创建
-	task, err := db.GetTaskByPath("test.mp4")
+	// 验证任务已创建（使用完整路径）
+	task, err := db.GetTaskByPath(testFile)
 	if err != nil {
 		t.Fatalf("查询任务失败: %v", err)
 	}
@@ -192,8 +194,8 @@ func TestScanDetectsFileUpdate(t *testing.T) {
 	ctx := context.Background()
 	scanner.Scan(ctx)
 
-	// 获取初始任务
-	task1, _ := db.GetTaskByPath("test.mp4")
+	// 获取初始任务（使用完整路径）
+	task1, _ := db.GetTaskByPath(testFile)
 	if task1 == nil {
 		t.Fatal("初始任务未创建")
 	}
@@ -208,8 +210,8 @@ func TestScanDetectsFileUpdate(t *testing.T) {
 	// 第二次扫描
 	scanner.Scan(ctx)
 
-	// 验证任务被重置
-	task2, _ := db.GetTaskByPath("test.mp4")
+	// 验证任务被重置（使用完整路径）
+	task2, _ := db.GetTaskByPath(testFile)
 	if task2.Status != database.StatusPending {
 		t.Errorf("文件更新后任务应被重置为pending，实际: %s", task2.Status)
 	}

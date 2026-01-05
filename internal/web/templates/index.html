@@ -56,12 +56,6 @@
             <div id="directoryList" class="space-y-2">
                 <p class="text-sm text-gray-500 text-center py-4">加载中...</p>
             </div>
-            <div class="mt-4 pt-4 border-t border-gray-200">
-                <div class="flex items-center justify-between">
-                    <span class="text-sm text-gray-600">输出目录:</span>
-                    <span id="outputDir" class="text-sm font-medium text-gray-900">-</span>
-                </div>
-            </div>
         </div>
 
         <!-- Worker 状态卡片 -->
@@ -186,23 +180,28 @@
                 const data = await res.json();
 
                 const listEl = document.getElementById('directoryList');
-                document.getElementById('outputDir').textContent = data.output_dir || '-';
 
-                if (!data.input_dirs || data.input_dirs.length === 0) {
+                if (!data.pairs || data.pairs.length === 0) {
                     listEl.innerHTML = '<p class="text-sm text-gray-500 text-center py-4">暂无监控目录</p>';
                     return;
                 }
 
-                listEl.innerHTML = data.input_dirs.map(dir => `
-                    <div class="flex items-center justify-between p-3 bg-gray-50 rounded-md">
-                        <div class="flex items-center space-x-2">
-                            <span class="text-xl">📁</span>
-                            <span class="text-sm font-medium text-gray-900">${dir}</span>
+                listEl.innerHTML = data.pairs.map(pair => `
+                    <div class="p-3 bg-gray-50 rounded-md space-y-2">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center space-x-2 flex-1 min-w-0">
+                                <span class="text-xl">📥</span>
+                                <span class="text-sm font-medium text-gray-900 truncate">${pair.input}</span>
+                            </div>
+                            <button onclick="removeDirectory('${pair.input}')" 
+                                class="ml-2 px-3 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition flex-shrink-0">
+                                删除
+                            </button>
                         </div>
-                        <button onclick="removeDirectory('${dir}')" 
-                            class="px-3 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition">
-                            删除
-                        </button>
+                        <div class="flex items-center space-x-2 ml-7">
+                            <span class="text-xl">📤</span>
+                            <span class="text-sm text-blue-600 truncate">${pair.output}</span>
+                        </div>
                     </div>
                 `).join('');
             } catch (err) {
@@ -218,9 +217,27 @@
             modal.innerHTML = `
                 <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-2xl max-h-[80vh] flex flex-col">
                     <div class="flex items-center justify-between mb-4">
-                        <h3 class="text-lg font-semibold">选择监控目录</h3>
+                        <h3 class="text-lg font-semibold">添加监控目录配对</h3>
                         <button onclick="this.closest('.fixed').remove()" class="text-gray-500 hover:text-gray-700">✕</button>
                     </div>
+                    
+                    <!-- 已选择的目录显示 -->
+                    <div class="mb-4 p-3 bg-blue-50 rounded-lg space-y-2">
+                        <div class="flex items-center space-x-2">
+                            <span class="text-sm font-semibold text-gray-700">📥 输入目录:</span>
+                            <span id="selectedInputDir" class="text-sm text-blue-600 font-mono">未选择</span>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <span class="text-sm font-semibold text-gray-700">📤 输出目录:</span>
+                            <span id="selectedOutputDir" class="text-sm text-blue-600 font-mono">未选择</span>
+                        </div>
+                    </div>
+                    
+                    <!-- 选择提示 -->
+                    <div class="mb-2 text-sm text-gray-600">
+                        <span id="selectHint">请选择输入目录（监控来源）</span>
+                    </div>
+                    
                     <div class="mb-4">
                         <div class="flex items-center space-x-2 text-sm text-gray-600 mb-2">
                             <span>当前路径:</span>
@@ -232,7 +249,7 @@
                         <p class="text-center text-gray-500 py-8">加载中...</p>
                     </div>
                     <div class="flex space-x-2">
-                        <button id="btnConfirmDir" class="flex-1 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">
+                        <button id="btnConfirmDir" class="flex-1 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 opacity-50" disabled>
                             确定添加
                         </button>
                         <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 bg-gray-300 text-gray-700 rounded hover:bg-gray-400">
@@ -244,7 +261,27 @@
             document.body.appendChild(modal);
 
             let currentPath = '/mnt';
-            let selectedPath = '';
+            let selectedInputPath = '';
+            let selectedOutputPath = '';
+
+            function updateSelectHint() {
+                const hintEl = document.getElementById('selectHint');
+                const btnConfirm = document.getElementById('btnConfirmDir');
+
+                if (!selectedInputPath) {
+                    hintEl.textContent = '请选择输入目录（监控来源）';
+                    btnConfirm.disabled = true;
+                    btnConfirm.classList.add('opacity-50');
+                } else if (!selectedOutputPath) {
+                    hintEl.textContent = '请选择输出目录（转码目标）';
+                    btnConfirm.disabled = true;
+                    btnConfirm.classList.add('opacity-50');
+                } else {
+                    hintEl.textContent = '✅ 已选择完成，点击"确定添加"';
+                    btnConfirm.disabled = false;
+                    btnConfirm.classList.remove('opacity-50');
+                }
+            }
 
             async function browsePath(path) {
                 try {
@@ -291,9 +328,27 @@
                         btn.addEventListener('click', (e) => {
                             e.stopPropagation();
                             const path = e.target.closest('.dir-item').dataset.path;
-                            selectedPath = path;
-                            browser.querySelectorAll('.dir-item').forEach(item => item.classList.remove('bg-blue-50', 'border-2', 'border-blue-500'));
-                            e.target.closest('.dir-item').classList.add('bg-blue-50', 'border-2', 'border-blue-500');
+
+                            // 根据当前状态决定选择的是输入还是输出目录
+                            if (!selectedInputPath) {
+                                selectedInputPath = path;
+                                document.getElementById('selectedInputDir').textContent = path;
+                                document.getElementById('selectedInputDir').classList.add('font-semibold');
+                            } else if (!selectedOutputPath) {
+                                selectedOutputPath = path;
+                                document.getElementById('selectedOutputDir').textContent = path;
+                                document.getElementById('selectedOutputDir').classList.add('font-semibold');
+                            } else {
+                                // 两个都已选择，替换输出目录
+                                selectedOutputPath = path;
+                                document.getElementById('selectedOutputDir').textContent = path;
+                            }
+
+                            updateSelectHint();
+
+                            // 高亮选中的项
+                            browser.querySelectorAll('.dir-item').forEach(item => item.classList.remove('bg-green-50', 'border-2', 'border-green-500'));
+                            e.target.closest('.dir-item').classList.add('bg-green-50', 'border-2', 'border-green-500');
                         });
                     });
 
@@ -312,8 +367,8 @@
 
             // 确定按钮
             document.getElementById('btnConfirmDir').addEventListener('click', async () => {
-                if (!selectedPath) {
-                    alert('请选择一个目录');
+                if (!selectedInputPath || !selectedOutputPath) {
+                    alert('请选择输入和输出目录');
                     return;
                 }
 
@@ -321,12 +376,15 @@
                     const res = await fetch('/api/directories', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ directory: selectedPath })
+                        body: JSON.stringify({
+                            input_dir: selectedInputPath,
+                            output_dir: selectedOutputPath
+                        })
                     });
                     const data = await res.json();
 
                     if (res.ok) {
-                        alert(`目录已添加: ${selectedPath}`);
+                        alert(`目录配对已添加:\n输入: ${selectedInputPath}\n输出: ${selectedOutputPath}`);
                         modal.remove();
                         loadDirectories();
                     } else {
@@ -341,20 +399,20 @@
             browsePath('/mnt');
         }
 
-        // 删除监控目录
-        async function removeDirectory(dir) {
-            if (!confirm(`确定要删除监控目录吗？\n${dir}`)) return;
+        // 删除监控目录配对
+        async function removeDirectory(inputDir) {
+            if (!confirm(`确定要删除此目录配对吗？\n输入: ${inputDir}`)) return;
 
             try {
                 const res = await fetch('/api/directories', {
                     method: 'DELETE',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ directory: dir })
+                    body: JSON.stringify({ input_dir: inputDir })
                 });
                 const data = await res.json();
 
                 if (res.ok) {
-                    alert('目录已删除');
+                    alert('目录配对已删除');
                     loadDirectories();
                 } else {
                     alert('删除失败: ' + data.error);

@@ -29,19 +29,19 @@ func New(cfg *config.Config, db *database.DB) *Scanner {
 
 // Scan 扫描输入目录并更新数据库
 func (s *Scanner) Scan(ctx context.Context) error {
-	inputDirs := s.config.GetInputDirs()
-	log.Printf("[Scanner] 开始扫描 %d 个目录", len(inputDirs))
+	pairs := s.config.GetPairs()
+	log.Printf("[Scanner] 开始扫描 %d 个目录配对", len(pairs))
 
 	totalNew := 0
 	totalUpdate := 0
 	totalSkip := 0
 	startTime := time.Now()
 
-	for _, inputDir := range inputDirs {
-		log.Printf("[Scanner] 扫描目录: %s", inputDir)
-		newCount, updateCount, skipCount, err := s.scanDirectory(ctx, inputDir)
+	for _, pair := range pairs {
+		log.Printf("[Scanner] 扫描目录: %s -> %s", pair.Input, pair.Output)
+		newCount, updateCount, skipCount, err := s.scanDirectory(ctx, pair.Input, pair.Output)
 		if err != nil {
-			log.Printf("[Scanner] 扫描目录失败 %s: %v", inputDir, err)
+			log.Printf("[Scanner] 扫描目录失败 %s: %v", pair.Input, err)
 			continue
 		}
 		totalNew += newCount
@@ -57,7 +57,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 }
 
 // scanDirectory 扫描单个目录
-func (s *Scanner) scanDirectory(ctx context.Context, inputDir string) (newCount, updateCount, skipCount int, err error) {
+func (s *Scanner) scanDirectory(ctx context.Context, inputDir string, outputDir string) (newCount, updateCount, skipCount int, err error) {
 	err = filepath.WalkDir(inputDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			log.Printf("[Scanner] 访问路径失败 %s: %v", path, walkErr)
@@ -105,8 +105,8 @@ func (s *Scanner) scanDirectory(ctx context.Context, inputDir string) (newCount,
 			return nil
 		}
 
-		// 处理文件
-		action := s.processFile(path, relPath, info.ModTime(), info.Size())
+		// 处理文件（传入对应的输出目录）
+		action := s.processFile(path, relPath, outputDir, info.ModTime(), info.Size())
 		switch action {
 		case "new":
 			newCount++
@@ -123,7 +123,7 @@ func (s *Scanner) scanDirectory(ctx context.Context, inputDir string) (newCount,
 }
 
 // processFile 处理单个文件
-func (s *Scanner) processFile(fullPath, relPath string, mtime time.Time, size int64) string {
+func (s *Scanner) processFile(fullPath, relPath, outputDir string, mtime time.Time, size int64) string {
 	// 查询数据库中是否存在该文件（使用完整路径）
 	task, err := s.db.GetTaskByPath(fullPath)
 	if err != nil {
