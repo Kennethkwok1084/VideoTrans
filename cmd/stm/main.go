@@ -88,17 +88,17 @@ func main() {
 
 	// 2. 关闭Web服务器（如果需要可以添加Shutdown方法）
 	log.Println("[Main] 正在关闭Web服务器...")
-	
+
 	// 3. 等待 Worker 完成当前任务
 	log.Println("[Main] 等待Worker完成当前任务...")
 	// Worker.Run() 内部会通过 ctx.Done() 收到信号，
 	// 并在当前任务完成后退出，wg.Wait() 会等待所有worker goroutine结束
-	
+
 	// 给一些时间让各模块优雅退出
 	log.Println("[Main] 等待后台服务停止（最多10秒）...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	
+
 	// 这里可以添加具体的等待逻辑
 	// 例如: work.Wait(), scan.Wait() 等
 	<-shutdownCtx.Done()
