@@ -56,10 +56,10 @@ func (w *Worker) Run(ctx context.Context) {
 
 	<-ctx.Done()
 	log.Println("[Worker] 收到停止信号，等待Worker完成...")
-	
+
 	// 关闭任务队列
 	close(w.taskQueue)
-	
+
 	// 等待所有Worker完成
 	w.wg.Wait()
 	log.Println("[Worker] Worker守护进程已退出")
@@ -92,7 +92,7 @@ func (w *Worker) GetForceRun() bool {
 func (w *Worker) SetForceRun(force bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	
+
 	w.forceRun = force
 	if force {
 		log.Println("[Worker] 强制运行模式已启用")
@@ -208,39 +208,39 @@ func (w *Worker) adjustWorkerPool(ctx context.Context, targetCount int) {
 		// 启动Worker Pool
 		w.workerCount = targetCount
 		w.workersStopped = false
-		
+
 		// 创建新的Context用于控制Workers
 		w.workerCtx, w.cancelWorkers = context.WithCancel(ctx)
-		
+
 		for i := 0; i < targetCount; i++ {
 			w.wg.Add(1)
 			go w.processWorker(w.workerCtx, i+1)
 		}
 		log.Printf("[WorkerPool] 已启动 %d 个Worker", targetCount)
-		
+
 		// 更新 Prometheus metrics
 		metrics.WorkersActive.Set(float64(targetCount))
-		
+
 	} else if currentCount > 0 && targetCount == 0 {
 		// 停止所有Worker
 		log.Println("[WorkerPool] 停止所有Worker...")
-		
+
 		if w.cancelWorkers != nil {
 			w.cancelWorkers() // 取消Worker Context
 		}
-		
+
 		// 等待所有Worker退出（不持有锁）
 		w.mu.Unlock()
 		w.wg.Wait()
 		w.mu.Lock()
-		
+
 		w.workerCount = 0
 		w.workersStopped = true
 		log.Println("[WorkerPool] 所有Worker已停止")
-		
+
 		// 更新 Prometheus metrics
 		metrics.WorkersActive.Set(0)
-		
+
 	} else if currentCount > 0 && targetCount > 0 && currentCount != targetCount {
 		// 动态调整Worker数量（暂不支持，需重启）
 		log.Printf("[WorkerPool] Worker数量调整 %d->%d 需重启Pool", currentCount, targetCount)
@@ -283,7 +283,7 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 
 				// 更新状态为失败
 				w.db.UpdateTaskStatus(task.ID, database.StatusFailed, err.Error())
-				
+
 				// 更新 Prometheus metrics
 				metrics.TranscodeFailed.Inc()
 			} else {
@@ -293,7 +293,7 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 				outputPath := filepath.Join(w.config.Path.Output, task.SourcePath)
 				if info, err := os.Stat(outputPath); err == nil {
 					w.db.UpdateTaskOutputSize(task.ID, info.Size())
-					
+
 					// 计算节省的空间
 					if task.SourceSize > 0 {
 						savedBytes := task.SourceSize - info.Size()
@@ -303,10 +303,10 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 
 				// 更新状态为完成
 				w.db.UpdateTaskStatus(task.ID, database.StatusCompleted, "转码成功")
-				
+
 				// 更新 Prometheus metrics
 				metrics.TranscodeSuccess.Inc()
-				
+
 				// 记录转码耗时
 				duration := time.Since(startTime).Seconds()
 				metrics.TranscodeDuration.Observe(duration)
@@ -346,16 +346,16 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 
 	// 构建FFmpeg命令
 	args := []string{
-		"-y",                        // 覆盖输出文件
-		"-progress", "pipe:1",       // 输出进度到stdout
-		"-i", inputPath,             // 输入文件
+		"-y",                  // 覆盖输出文件
+		"-progress", "pipe:1", // 输出进度到stdout
+		"-i", inputPath, // 输入文件
 		"-c:v", w.config.FFmpeg.Codec, // 视频编码器
 		"-preset", w.config.FFmpeg.Preset, // 预设
 		"-crf", strconv.Itoa(w.config.FFmpeg.CRF), // CRF质量
 		"-c:a", w.config.FFmpeg.Audio, // 音频编码器
 		"-b:a", w.config.FFmpeg.AudioBitrate, // 音频比特率
-		"-movflags", "+faststart",   // 优化流式播放
-		outputPath,                  // 输出文件
+		"-movflags", "+faststart", // 优化流式播放
+		outputPath, // 输出文件
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)

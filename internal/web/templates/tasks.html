@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>任务列表 - STM 视频转码服务</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
+
 <body class="bg-gray-50 min-h-screen">
     <!-- 导航栏 -->
     <nav class="bg-white shadow-sm border-b border-gray-200">
@@ -88,15 +90,15 @@
 
         <!-- 分页 -->
         <div class="mt-6 flex items-center justify-between">
-            <button id="btnPrev" onclick="prevPage()" 
-                    class="px-4 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
+            <button id="btnPrev" onclick="prevPage()"
+                class="px-4 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
                 上一页
             </button>
             <div class="text-sm text-gray-700">
                 第 <span id="currentPage">1</span> 页
             </div>
-            <button id="btnNext" onclick="nextPage()" 
-                    class="px-4 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
+            <button id="btnNext" onclick="nextPage()"
+                class="px-4 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
                 下一页
             </button>
         </div>
@@ -106,6 +108,7 @@
         .filter-btn {
             @apply px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition;
         }
+
         .filter-btn.active {
             @apply bg-blue-600 text-white border-blue-600 hover:bg-blue-700;
         }
@@ -155,9 +158,9 @@
                 const filter = currentFilter === 'all' ? '' : currentFilter;
                 const res = await fetch(`/api/tasks?status=${filter}&page=${currentPage}&limit=${pageSize}`);
                 const tasks = await res.json();
-                
+
                 const tbody = document.getElementById('taskTableBody');
-                
+
                 if (tasks.length === 0) {
                     tbody.innerHTML = `
                         <tr>
@@ -169,13 +172,13 @@
                     document.getElementById('btnNext').disabled = true;
                     return;
                 }
-                
+
                 tbody.innerHTML = tasks.map(task => {
                     const savedBytes = task.original_size - task.output_size;
-                    const savedPercent = task.original_size > 0 
+                    const savedPercent = task.original_size > 0
                         ? ((savedBytes / task.original_size) * 100).toFixed(1)
                         : 0;
-                    
+
                     return `
                         <tr class="hover:bg-gray-50">
                             <td class="px-6 py-4">
@@ -190,41 +193,41 @@
                                 ${getStatusBadge(task.status)}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap">
-                                ${task.status === 'processing' 
-                                    ? `<div class="w-full bg-gray-200 rounded-full h-2">
+                                ${task.status === 'processing'
+                            ? `<div class="w-full bg-gray-200 rounded-full h-2">
                                          <div class="bg-blue-600 h-2 rounded-full" style="width: ${task.progress}%"></div>
                                        </div>
                                        <span class="text-xs text-gray-600 mt-1">${task.progress}%</span>`
-                                    : '-'}
+                            : '-'}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap">
-                                ${task.original_size > 0 
-                                    ? `<div class="text-sm text-gray-900">
+                                ${task.original_size > 0
+                            ? `<div class="text-sm text-gray-900">
                                          ${formatSize(task.original_size)} → ${formatSize(task.output_size)}
                                        </div>
                                        <div class="text-xs text-green-600">
                                          节省 ${savedPercent}%
                                        </div>`
-                                    : '-'}
+                            : '-'}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                                 ${formatTime(task.created_at)}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                ${task.status === 'failed' 
-                                    ? `<button onclick="retryTask(${task.id})" class="text-blue-600 hover:text-blue-900 mr-3">重试</button>`
-                                    : ''}
+                                ${task.status === 'failed'
+                            ? `<button onclick="retryTask(${task.id})" class="text-blue-600 hover:text-blue-900 mr-3">重试</button>`
+                            : ''}
                                 <button onclick="deleteTask(${task.id})" class="text-red-600 hover:text-red-900">删除</button>
                             </td>
                         </tr>
                     `;
                 }).join('');
-                
+
                 // 更新分页按钮
                 document.getElementById('btnPrev').disabled = currentPage === 1;
                 document.getElementById('btnNext').disabled = tasks.length < pageSize;
                 document.getElementById('currentPage').textContent = currentPage;
-                
+
             } catch (err) {
                 console.error('加载任务失败:', err);
             }
@@ -234,13 +237,13 @@
         function filterTasks(status) {
             currentFilter = status;
             currentPage = 1;
-            
+
             // 更新按钮样式
             document.querySelectorAll('.filter-btn').forEach(btn => {
                 btn.classList.remove('active');
             });
             document.getElementById(`btn${status.charAt(0).toUpperCase() + status.slice(1)}`).classList.add('active');
-            
+
             loadTasks();
         }
 
@@ -261,7 +264,7 @@
         // 重试任务
         async function retryTask(id) {
             if (!confirm('确定要重试此任务吗？')) return;
-            
+
             try {
                 await fetch(`/api/tasks/${id}/retry`, { method: 'POST' });
                 alert('任务已重新加入队列');
@@ -274,7 +277,7 @@
         // 删除任务
         async function deleteTask(id) {
             if (!confirm('确定要删除此任务记录吗？此操作不可撤销。')) return;
-            
+
             try {
                 await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
                 alert('任务已删除');
@@ -286,9 +289,10 @@
 
         // 初始化
         loadTasks();
-        
+
         // 定期刷新（每 10 秒）
         setInterval(loadTasks, 10000);
     </script>
 </body>
+
 </html>

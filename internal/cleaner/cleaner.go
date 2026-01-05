@@ -112,7 +112,7 @@ func (c *Cleaner) moveToTrash() error {
 
 		movedCount++
 		log.Printf("[Cleaner] 已移入垃圾桶: %s", task.SourcePath)
-		
+
 		// 更新 Prometheus metrics
 		metrics.FilesSoftDeleted.Inc()
 	}
@@ -255,7 +255,7 @@ func (c *Cleaner) emptyTrash() error {
 			}
 			deletedCount++
 			log.Printf("[Cleaner] 彻底删除过期文件: %s", filename)
-			
+
 			// 更新 Prometheus metrics
 			metrics.FilesHardDeleted.Inc()
 		}

@@ -31,7 +31,7 @@ func New(cfg *config.Config, db *database.DB, scan *scanner.Scanner, work *worke
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.Default()
-	
+
 	// 加载HTML模板
 	router.LoadHTMLGlob("internal/web/templates/*.html")
 

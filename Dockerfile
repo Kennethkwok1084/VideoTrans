@@ -15,7 +15,7 @@ COPY . .
 
 # 编译（禁用 CGO，静态链接）
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -o stm ./cmd/stm
+  go build -ldflags="-s -w" -o stm ./cmd/stm
 
 # ============ Stage 2: 运行时环境 ============
 FROM jrottenberg/ffmpeg:6.1-alpine

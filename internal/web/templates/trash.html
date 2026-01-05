@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>垃圾桶 - STM 视频转码服务</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
+
 <body class="bg-gray-50 min-h-screen">
     <!-- 导航栏 -->
     <nav class="bg-white shadow-sm border-b border-gray-200">
@@ -49,8 +51,8 @@
                         占用 <span id="totalSize" class="font-medium">0 MB</span>
                     </p>
                 </div>
-                <button onclick="emptyTrash()" 
-                        class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition">
+                <button onclick="emptyTrash()"
+                    class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition">
                     清空垃圾桶
                 </button>
             </div>
@@ -106,12 +108,12 @@
                     </p>
                 </div>
                 <div class="flex gap-4 mt-4">
-                    <button onclick="closeDeleteModal()" 
-                            class="flex-1 px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 transition">
+                    <button onclick="closeDeleteModal()"
+                        class="flex-1 px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 transition">
                         取消
                     </button>
-                    <button onclick="confirmDelete()" 
-                            class="flex-1 px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition">
+                    <button onclick="confirmDelete()"
+                        class="flex-1 px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition">
                         确认删除
                     </button>
                 </div>
@@ -151,7 +153,7 @@
             const deleteDeadline = new Date(deleteDate.getTime() + 30 * 24 * 60 * 60 * 1000);
             const now = new Date();
             const daysLeft = Math.ceil((deleteDeadline - now) / (1000 * 60 * 60 * 24));
-            
+
             if (daysLeft < 0) return '即将删除';
             if (daysLeft === 0) return '今天';
             if (daysLeft === 1) return '明天';
@@ -165,7 +167,7 @@
             const deleteDeadline = new Date(deleteDate.getTime() + 30 * 24 * 60 * 60 * 1000);
             const now = new Date();
             const daysLeft = Math.ceil((deleteDeadline - now) / (1000 * 60 * 60 * 24));
-            
+
             if (daysLeft <= 3) return 'text-red-600 font-semibold';
             if (daysLeft <= 7) return 'text-yellow-600 font-medium';
             return 'text-gray-600';
@@ -176,14 +178,14 @@
             try {
                 const res = await fetch('/api/trash');
                 const data = await res.json();
-                
+
                 const tbody = document.getElementById('trashTableBody');
                 const fileCountEl = document.getElementById('fileCount');
                 const totalSizeEl = document.getElementById('totalSize');
-                
+
                 fileCountEl.textContent = data.files?.length || 0;
                 totalSizeEl.textContent = formatSize(data.total_size || 0);
-                
+
                 if (!data.files || data.files.length === 0) {
                     tbody.innerHTML = `
                         <tr>
@@ -194,7 +196,7 @@
                     `;
                     return;
                 }
-                
+
                 tbody.innerHTML = data.files.map(file => `
                     <tr class="hover:bg-gray-50">
                         <td class="px-6 py-4">
@@ -219,7 +221,7 @@
                         </td>
                     </tr>
                 `).join('');
-                
+
             } catch (err) {
                 console.error('加载垃圾桶失败:', err);
             }
@@ -241,12 +243,12 @@
         // 确认删除
         async function confirmDelete() {
             if (!deleteTarget) return;
-            
+
             try {
                 const res = await fetch(`/api/trash/${encodeURIComponent(deleteTarget)}`, {
                     method: 'DELETE'
                 });
-                
+
                 if (res.ok) {
                     alert('文件已永久删除');
                     loadTrashFiles();
@@ -265,7 +267,7 @@
         async function emptyTrash() {
             if (!confirm('确定要清空垃圾桶吗？所有文件将被永久删除，此操作不可撤销！')) return;
             if (!confirm('最后确认：真的要删除垃圾桶中的所有文件吗？')) return;
-            
+
             try {
                 // TODO: 实现批量删除 API
                 alert('功能开发中...');
@@ -276,9 +278,10 @@
 
         // 初始化
         loadTrashFiles();
-        
+
         // 定期刷新（每 30 秒）
         setInterval(loadTrashFiles, 30000);
     </script>
 </body>
+
 </html>

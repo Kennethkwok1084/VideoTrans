@@ -19,13 +19,13 @@ type Config struct {
 
 // SystemConfig 系统配置
 type SystemConfig struct {
-	CronStart         int `yaml:"cron_start"`          // 工作开始时间（小时）
-	CronEnd           int `yaml:"cron_end"`            // 工作结束时间（小时）
-	MaxWorkers        int `yaml:"max_workers"`         // 最大并发数
-	ScanInterval      int `yaml:"scan_interval"`       // 扫描间隔（分钟）
-	SchedulerInterval int `yaml:"scheduler_interval"`  // 调度器检查间隔（秒）
-	TaskQueueSize     int `yaml:"task_queue_size"`     // 任务队列容量
-	MinDiskSpaceGB    int `yaml:"min_disk_space_gb"`   // 最小磁盘空间要求（GB）
+	CronStart         int `yaml:"cron_start"`         // 工作开始时间（小时）
+	CronEnd           int `yaml:"cron_end"`           // 工作结束时间（小时）
+	MaxWorkers        int `yaml:"max_workers"`        // 最大并发数
+	ScanInterval      int `yaml:"scan_interval"`      // 扫描间隔（分钟）
+	SchedulerInterval int `yaml:"scheduler_interval"` // 调度器检查间隔（秒）
+	TaskQueueSize     int `yaml:"task_queue_size"`    // 任务队列容量
+	MinDiskSpaceGB    int `yaml:"min_disk_space_gb"`  // 最小磁盘空间要求（GB）
 }
 
 // PathConfig 路径配置
@@ -38,12 +38,12 @@ type PathConfig struct {
 
 // FFmpegConfig FFmpeg配置
 type FFmpegConfig struct {
-	Codec          string   `yaml:"codec"`
-	Preset         string   `yaml:"preset"`
-	CRF            int      `yaml:"crf"`
-	Audio          string   `yaml:"audio"`
-	AudioBitrate   string   `yaml:"audio_bitrate"`
-	Extensions     []string `yaml:"extensions"`
+	Codec           string   `yaml:"codec"`
+	Preset          string   `yaml:"preset"`
+	CRF             int      `yaml:"crf"`
+	Audio           string   `yaml:"audio"`
+	AudioBitrate    string   `yaml:"audio_bitrate"`
+	Extensions      []string `yaml:"extensions"`
 	ExcludePatterns []string `yaml:"exclude_patterns"`
 }
 
