@@ -174,9 +174,9 @@
                 }
 
                 tbody.innerHTML = tasks.map(task => {
-                    const savedBytes = task.original_size - task.output_size;
-                    const savedPercent = task.original_size > 0
-                        ? ((savedBytes / task.original_size) * 100).toFixed(1)
+                    const savedBytes = task.source_size - task.output_size;
+                    const savedPercent = task.source_size > 0
+                        ? ((savedBytes / task.source_size) * 100).toFixed(1)
                         : 0;
 
                     return `
@@ -201,9 +201,9 @@
                             : '-'}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap">
-                                ${task.original_size > 0
+                                ${task.source_size > 0
                             ? `<div class="text-sm text-gray-900">
-                                         ${formatSize(task.original_size)} → ${formatSize(task.output_size)}
+                                         ${formatSize(task.source_size)} → ${formatSize(task.output_size)}
                                        </div>
                                        <div class="text-xs text-green-600">
                                          节省 ${savedPercent}%
