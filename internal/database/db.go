@@ -286,11 +286,11 @@ func (db *DB) IncrementRetryCount(id int64) error {
 func (db *DB) GetStats() (*Stats, error) {
 	query := `
 		SELECT 
-			SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,
-			SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing_count,
-			SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
-			SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
-			SUM(CASE WHEN status = 'completed' THEN (source_size - output_size) ELSE 0 END) as total_saved
+			COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) as pending_count,
+			COALESCE(SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END), 0) as processing_count,
+			COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed_count,
+			COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed_count,
+			COALESCE(SUM(CASE WHEN status = 'completed' THEN (source_size - output_size) ELSE 0 END), 0) as total_saved
 		FROM tasks
 	`
 

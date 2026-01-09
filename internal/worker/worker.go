@@ -151,6 +151,14 @@ func (w *Worker) scheduler(ctx context.Context) {
 				continue
 			}
 
+			// 检查是否正在优雅关闭
+			w.mu.RLock()
+			stopped := w.workersStopped
+			w.mu.RUnlock()
+			if stopped {
+				continue // 优雅关闭中，不再添加新任务
+			}
+
 			// 检查队列容量
 			if len(w.taskQueue) >= cap(w.taskQueue) {
 				continue // 队列已满，跳过本次调度
@@ -249,21 +257,33 @@ func (w *Worker) adjustWorkerPool(ctx context.Context, targetCount int) {
 		metrics.WorkersActive.Set(float64(targetCount))
 
 	} else if currentCount > 0 && targetCount == 0 {
-		// 停止所有Worker
-		log.Println("[WorkerPool] 停止所有Worker...")
+		// 优雅停止所有Worker：不再接受新任务，等待当前任务完成
+		log.Println("[WorkerPool] 进入优雅关闭模式，等待当前任务完成...")
+		
+		// 设置标志：不再接受新任务（调度器会检查这个）
+		w.workersStopped = true
 
-		if w.cancelWorkers != nil {
-			w.cancelWorkers() // 取消Worker Context
-		}
-
-		// 等待所有Worker退出（不持有锁）
+		// 关闭任务队列，通知workers不再有新任务
+		// 但不取消context，让正在执行的任务继续完成
+		close(w.taskQueue)
+		
+		// 释放锁，等待所有Worker完成当前任务
 		w.mu.Unlock()
+		log.Println("[WorkerPool] 等待所有正在处理的任务完成...")
 		w.wg.Wait()
+		log.Println("[WorkerPool] 所有任务已完成")
 		w.mu.Lock()
 
+		// 现在可以安全地清理资源
+		if w.cancelWorkers != nil {
+			w.cancelWorkers()
+		}
+		
+		// 重新创建任务队列供下次启动使用
+		w.taskQueue = make(chan *database.Task, w.config.System.TaskQueueSize)
+
 		w.workerCount = 0
-		w.workersStopped = true
-		log.Println("[WorkerPool] 所有Worker已停止")
+		log.Println("[WorkerPool] 所有Worker已优雅停止")
 
 		// 更新 Prometheus metrics
 		metrics.WorkersActive.Set(0)
@@ -286,6 +306,7 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 			return
 		case task, ok := <-w.taskQueue:
 			if !ok {
+				// 队列已关闭，说明进入优雅关闭模式，完成当前任务后退出
 				log.Printf("[Worker-%d] 任务队列已关闭，退出", workerID)
 				return
 			}
@@ -301,8 +322,9 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 				continue
 			}
 
-			// 执行转码
-			if err := w.transcode(ctx, task, workerID); err != nil {
+			// 执行转码（使用独立的 context，不受 ctx.Done() 影响）
+			taskCtx := context.Background()
+			if err := w.transcode(taskCtx, task, workerID); err != nil {
 				log.Printf("[Worker-%d] 转码失败 #%d: %v", workerID, task.ID, err)
 
 				// 增加重试次数

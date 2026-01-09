@@ -29,6 +29,13 @@ func New(cfg *config.Config, db *database.DB) *Scanner {
 
 // Scan 扫描输入目录并更新数据库
 func (s *Scanner) Scan(ctx context.Context) error {
+	// 调试日志：检查 context 状态
+	if ctx.Err() != nil {
+		log.Printf("[Scanner] ⚠️  WARNING: Scan 启动时 context 已被取消: %v", ctx.Err())
+	} else {
+		log.Printf("[Scanner] ✓ context 状态正常，类型: %T", ctx)
+	}
+
 	pairs := s.config.GetPairs()
 	log.Printf("[Scanner] 开始扫描 %d 个目录配对", len(pairs))
 
@@ -58,6 +65,12 @@ func (s *Scanner) Scan(ctx context.Context) error {
 
 // scanDirectory 扫描单个目录
 func (s *Scanner) scanDirectory(ctx context.Context, inputDir string, outputDir string) (newCount, updateCount, skipCount int, err error) {
+	// 调试日志：扫描开始前检查 context
+	if ctx.Err() != nil {
+		log.Printf("[Scanner] ⚠️  scanDirectory 启动时 context 已取消: %v", ctx.Err())
+		return 0, 0, 0, ctx.Err()
+	}
+
 	err = filepath.WalkDir(inputDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			log.Printf("[Scanner] 访问路径失败 %s: %v", path, walkErr)
@@ -67,6 +80,7 @@ func (s *Scanner) scanDirectory(ctx context.Context, inputDir string, outputDir 
 		// 检查上下文取消
 		select {
 		case <-ctx.Done():
+			log.Printf("[Scanner] ⚠️  ctx.Done() 被触发，原因: %v", ctx.Err())
 			return ctx.Err()
 		default:
 		}
