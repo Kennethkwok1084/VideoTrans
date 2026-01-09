@@ -24,7 +24,7 @@ services:
       # - STM_MAX_WORKERS=3
 
     ports:
-      - "8080:8080"
+      - "9999:8080"
 
     restart: unless-stopped
 
@@ -32,8 +32,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '6' # 3500X 6核心
-          memory: 4G
+          cpus: '4' # 3500X 6核心
+          memory: 3G
         reservations:
           cpus: '2'
           memory: 1G

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -130,8 +131,14 @@ func (s *Server) handleGetTasks(c *gin.Context) {
 
 // handleTriggerScan 手动触发扫描
 func (s *Server) handleTriggerScan(c *gin.Context) {
+	log.Printf("[API] 收到手动扫描请求，来自: %s", c.ClientIP())
+
 	go func() {
-		if err := s.scanner.Scan(c.Request.Context()); err != nil {
+		// 使用独立的 context，不绑定到 HTTP 请求生命周期
+		ctx := context.Background()
+		log.Printf("[API] 启动扫描 goroutine，context 类型: %T, 已取消: %v", ctx, ctx.Err() != nil)
+
+		if err := s.scanner.Scan(ctx); err != nil {
 			log.Printf("手动扫描失败: %v", err)
 		}
 	}()

@@ -30,6 +30,9 @@ FROM jrottenberg/ffmpeg:6.1-alpine
 # 配置国内镜像源
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
+# 安装时区数据
+RUN apk add --no-cache tzdata
+
 # 创建应用目录
 WORKDIR /app
 

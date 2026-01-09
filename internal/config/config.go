@@ -41,8 +41,8 @@ type PathConfig struct {
 
 // InputOutputPair 输入输出目录配对
 type InputOutputPair struct {
-	Input  string `yaml:"input"`
-	Output string `yaml:"output"`
+	Input  string `yaml:"input" json:"input"`
+	Output string `yaml:"output" json:"output"`
 }
 
 // FFmpegConfig FFmpeg配置
