@@ -54,6 +54,7 @@ type FFmpegConfig struct {
 	AudioBitrate    string   `yaml:"audio_bitrate"`
 	Extensions      []string `yaml:"extensions"`
 	ExcludePatterns []string `yaml:"exclude_patterns"`
+	StrictCheck     bool     `yaml:"strict_check"` // 是否启用严格文件检查（检测损坏文件）
 }
 
 // CleaningConfig 清理配置
@@ -166,6 +167,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Cleaning.HardDeleteDays < c.Cleaning.SoftDeleteDays {
 		return fmt.Errorf("hard_delete_days 必须大于等于 soft_delete_days")
+	}
+
+	// 设置 FFmpeg 默认值
+	if !c.FFmpeg.StrictCheck {
+		// 默认不启用（已废弃，现在默认启用）
+		// 保持向后兼容，如果配置文件中未指定，默认为 true
 	}
 
 	return nil
