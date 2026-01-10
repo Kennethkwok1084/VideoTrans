@@ -282,6 +282,26 @@ func (db *DB) IncrementRetryCount(id int64) error {
 	return err
 }
 
+// ResetFailedTasksToPending 批量重置失败任务为待处理
+func (db *DB) ResetFailedTasksToPending() (int64, error) {
+	query := `
+		UPDATE tasks
+		SET status = ?, retry_count = 0, progress = 0, completed_at = NULL, log = ?
+		WHERE status = ?
+	`
+	result, err := db.conn.Exec(query, StatusPending, "手动一键重试", StatusFailed)
+	if err != nil {
+		return 0, err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	return rows, nil
+}
+
 // GetStats 获取统计信息
 func (db *DB) GetStats() (*Stats, error) {
 	query := `

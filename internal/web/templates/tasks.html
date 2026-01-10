@@ -47,8 +47,14 @@
                         失败
                     </button>
                 </div>
-                <div class="text-sm text-gray-600">
-                    共 <span id="totalCount">0</span> 个任务
+                <div class="flex items-center space-x-3">
+                    <button id="btnRetryFailed" onclick="retryFailed()"
+                        class="hidden px-3 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 transition">
+                        一键重试失败
+                    </button>
+                    <div class="text-sm text-gray-600">
+                        共 <span id="totalCount">0</span> 个任务
+                    </div>
                 </div>
             </div>
         </div>
@@ -118,6 +124,7 @@
         let currentFilter = 'all';
         let currentPage = 1;
         const pageSize = 20;
+        const retryFailedBtn = document.getElementById('btnRetryFailed');
 
         // 获取状态徽章 HTML
         function getStatusBadge(status) {
@@ -152,6 +159,28 @@
             });
         }
 
+        function getLogText(task) {
+            if (!task || !task.log) return '';
+            if (typeof task.log === 'string') return task.log;
+            if (task.log.Valid) return task.log.String || '';
+            return '';
+        }
+
+        function formatLogSnippet(text, maxLen) {
+            if (!text) return '';
+            if (text.length <= maxLen) return text;
+            return text.slice(0, maxLen) + '...';
+        }
+
+        function escapeHtml(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         // 加载任务列表
         async function loadTasks() {
             try {
@@ -178,6 +207,10 @@
                     const savedPercent = task.source_size > 0
                         ? ((savedBytes / task.source_size) * 100).toFixed(1)
                         : 0;
+                    const logText = getLogText(task);
+                    const logSnippet = formatLogSnippet(logText, 120);
+                    const errorText = logSnippet || '未知错误';
+                    const errorTitle = logText || errorText;
 
                     return `
                         <tr class="hover:bg-gray-50">
@@ -191,6 +224,9 @@
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap">
                                 ${getStatusBadge(task.status)}
+                                ${task.status === 'failed'
+                            ? `<div class="text-xs text-red-600 mt-1" title="${escapeHtml(errorTitle)}">${escapeHtml(errorText)}</div>`
+                            : ''}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap">
                                 ${task.status === 'processing'
@@ -244,6 +280,7 @@
             });
             document.getElementById(`btn${status.charAt(0).toUpperCase() + status.slice(1)}`).classList.add('active');
 
+            updateFailedActions();
             loadTasks();
         }
 
@@ -274,6 +311,30 @@
             }
         }
 
+        // 一键重试失败任务
+        async function retryFailed() {
+            if (!confirm('确定要重试全部失败任务吗？')) return;
+
+            try {
+                const res = await fetch('/api/tasks/retry-failed', { method: 'POST' });
+                const data = await res.json();
+                const count = data.count || 0;
+                alert(`已重试 ${count} 个失败任务`);
+                loadTasks();
+            } catch (err) {
+                alert('重试失败: ' + err.message);
+            }
+        }
+
+        function updateFailedActions() {
+            if (!retryFailedBtn) return;
+            if (currentFilter === 'failed') {
+                retryFailedBtn.classList.remove('hidden');
+            } else {
+                retryFailedBtn.classList.add('hidden');
+            }
+        }
+
         // 删除任务
         async function deleteTask(id) {
             if (!confirm('确定要删除此任务记录吗？此操作不可撤销。')) return;
@@ -289,6 +350,7 @@
 
         // 初始化
         loadTasks();
+        updateFailedActions();
 
         // 定期刷新（每 10 秒）
         setInterval(loadTasks, 10000);
