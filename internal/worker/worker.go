@@ -3,6 +3,7 @@ package worker
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -371,33 +372,40 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 				// 执行转码（使用独立的 context，不受 ctx.Done() 影响）
 				taskCtx := context.Background()
 				if err := w.transcode(taskCtx, task, workerID); err != nil {
-					// 详细的错误日志
-					errMsg := err.Error()
-					log.Printf("[Worker-%d] ❌ 转码失败 #%d: %s", workerID, task.ID, task.SourcePath)
+				// 详细的错误日志
+				errMsg := err.Error()
+				log.Printf("[Worker-%d] ❌ 转码失败 #%d: %s", workerID, task.ID, task.SourcePath)
 
-					// 判断错误类型并给出提示
-					if strings.Contains(errMsg, "文件损坏") || strings.Contains(errMsg, "解码测试失败") {
-						log.Printf("[Worker-%d] 🔍 源文件损坏或格式不支持，建议检查: %s", workerID, task.SourcePath)
-					} else if strings.Contains(errMsg, "磁盘空间") {
-						log.Printf("[Worker-%d] 💾 磁盘空间不足，转码中止", workerID)
-					} else if strings.Contains(errMsg, "FFmpeg执行失败") {
-						// 截取关键错误信息（避免日志过长）
-						if len(errMsg) > 1000 {
-							log.Printf("[Worker-%d] 📋 FFmpeg错误 (前500字符): %s", workerID, errMsg[:500])
-						} else {
-							log.Printf("[Worker-%d] 📋 错误详情: %s", workerID, errMsg)
-						}
+				category, transient := classifyError(errMsg)
+				if category != "" {
+					log.Printf("[Worker-%d] 🧭 失败原因: %s", workerID, category)
+				}
+
+				// 截取关键错误信息（避免日志过长）
+				if len(errMsg) > 1000 {
+					log.Printf("[Worker-%d] 📋 错误详情 (前500字符): %s", workerID, errMsg[:500])
+				} else {
+					log.Printf("[Worker-%d] 📋 错误详情: %s", workerID, errMsg)
+				}
+
+				nextRetry := task.RetryCount + 1
+				w.db.IncrementRetryCount(task.ID)
+
+				if transient && nextRetry < 3 {
+					logMsg := errMsg
+					if category != "" {
+						logMsg = fmt.Sprintf("自动重试: %s\n%s", category, errMsg)
 					}
-
-					// 增加重试次数
-					w.db.IncrementRetryCount(task.ID)
-
+					w.db.UpdateTaskProgress(task.ID, 0)
+					w.db.UpdateTaskStatus(task.ID, database.StatusPending, logMsg)
+				} else {
 					// 更新状态为失败（存储完整错误信息到数据库）
 					w.db.UpdateTaskStatus(task.ID, database.StatusFailed, errMsg)
+				}
 
-					// 更新 Prometheus metrics
-					metrics.TranscodeFailed.Inc()
-				} else {
+				// 更新 Prometheus metrics
+				metrics.TranscodeFailed.Inc()
+			} else {
 					log.Printf("[Worker-%d] ✅ 转码成功 #%d: %s", workerID, task.ID, task.SourcePath)
 
 					// 更新输出文件大小 - 单次遍历获取输出路径
@@ -423,6 +431,8 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 							}
 						}
 					}
+
+					w.db.UpdateTaskProgress(task.ID, 100.0)
 
 					// 更新状态为完成
 					w.db.UpdateTaskStatus(task.ID, database.StatusCompleted, "转码成功")
@@ -502,7 +512,11 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		outputPath, // 输出文件
 	}
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	maxDuration := computeFfmpegTimeout(duration, w.config)
+	ffCtx, cancel := context.WithTimeout(ctx, maxDuration)
+	defer cancel()
+
+	cmd := exec.CommandContext(ffCtx, "ffmpeg", args...)
 
 	// 获取stdout和stderr
 	stdout, err := cmd.StdoutPipe()
@@ -529,11 +543,49 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		}
 	}()
 
-	// 解析进度
-	go w.parseProgress(bufio.NewReader(stdout), task.ID, duration, workerID)
+	progressStall := time.Duration(w.config.FFmpeg.ProgressStallMinutes) * time.Minute
+	lastProgressUnix := time.Now().UnixNano()
+	progressDone := make(chan struct{})
+	go func() {
+		w.parseProgress(bufio.NewReader(stdout), task.ID, duration, workerID, &lastProgressUnix)
+		close(progressDone)
+	}()
+
+	stallReasonCh := make(chan string, 1)
+	stallTicker := time.NewTicker(30 * time.Second)
+	defer stallTicker.Stop()
+	go func() {
+		for {
+			select {
+			case <-progressDone:
+				return
+			case <-ffCtx.Done():
+				return
+			case <-stallTicker.C:
+				last := time.Unix(0, atomic.LoadInt64(&lastProgressUnix))
+				if time.Since(last) > progressStall {
+					stallReasonCh <- fmt.Sprintf("FFmpeg进度超过%v未更新，疑似IO卡住", progressStall)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 
 	// 等待命令完成
 	if err := cmd.Wait(); err != nil {
+		stallReason := ""
+		select {
+		case stallReason = <-stallReasonCh:
+		default:
+		}
+
+		if stallReason != "" {
+			return fmt.Errorf("%s: %w\n日志:\n%s", stallReason, err, stderrBuf.String())
+		}
+		if errors.Is(ffCtx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("FFmpeg超时(%s): %w\n日志:\n%s", maxDuration, err, stderrBuf.String())
+		}
 		return fmt.Errorf("FFmpeg执行失败: %w\n日志:\n%s", err, stderrBuf.String())
 	}
 
@@ -543,7 +595,11 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 // probeFile 使用ffprobe检查文件
 func (w *Worker) probeFile(path string) error {
 	// 增强检查：同时验证视频流和音频流
-	cmd := exec.Command("ffprobe",
+	probeTimeout := time.Duration(w.config.FFmpeg.ProbeTimeoutSeconds) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
 		"-select_streams", "v:0", // 检查第一个视频流
 		"-show_entries", "stream=codec_name,duration",
@@ -552,6 +608,9 @@ func (w *Worker) probeFile(path string) error {
 	)
 
 	output, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("ffprobe超时(%s): %w", probeTimeout, ctx.Err())
+	}
 	if err != nil {
 		return fmt.Errorf("视频流检查失败 (文件可能损坏): %w, output: %s", err, string(output))
 	}
@@ -562,7 +621,10 @@ func (w *Worker) probeFile(path string) error {
 	}
 
 	// 额外检查：尝试解码前几帧
-	decodeCmd := exec.Command("ffmpeg",
+	decodeCtx, decodeCancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer decodeCancel()
+
+	decodeCmd := exec.CommandContext(decodeCtx, "ffmpeg",
 		"-v", "error",
 		"-t", "2", // 只检查前2秒
 		"-i", path,
@@ -571,6 +633,9 @@ func (w *Worker) probeFile(path string) error {
 	)
 
 	decodeOutput, decodeErr := decodeCmd.CombinedOutput()
+	if errors.Is(decodeCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("解码测试超时(%s): %w", probeTimeout, decodeCtx.Err())
+	}
 	if decodeErr != nil {
 		// 检查是否有解码错误
 		errMsg := string(decodeOutput)
@@ -591,7 +656,11 @@ func min(a, b int) int {
 
 // getDuration 获取视频时长（秒）
 func (w *Worker) getDuration(path string) (float64, error) {
-	cmd := exec.Command("ffprobe",
+	probeTimeout := time.Duration(w.config.FFmpeg.ProbeTimeoutSeconds) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
 		"-show_entries", "format=duration",
 		"-of", "default=noprint_wrappers=1:nokey=1",
@@ -599,6 +668,9 @@ func (w *Worker) getDuration(path string) (float64, error) {
 	)
 
 	output, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return 0, fmt.Errorf("ffprobe超时(%s): %w", probeTimeout, ctx.Err())
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -612,8 +684,20 @@ func (w *Worker) getDuration(path string) (float64, error) {
 	return duration, nil
 }
 
+func computeFfmpegTimeout(duration float64, cfg *config.Config) time.Duration {
+	timeout := time.Duration(cfg.FFmpeg.MaxDurationHours) * time.Hour
+	if duration > 0 && cfg.FFmpeg.DurationFactor > 0 {
+		candidate := time.Duration(duration*cfg.FFmpeg.DurationFactor*float64(time.Second)) +
+			time.Duration(cfg.FFmpeg.DurationExtraMinutes)*time.Minute
+		if candidate > timeout {
+			timeout = candidate
+		}
+	}
+	return timeout
+}
+
 // parseProgress 解析FFmpeg进度输出 (优化：每5%或5秒更新一次)
-func (w *Worker) parseProgress(reader *bufio.Reader, taskID int64, totalDuration float64, workerID int) {
+func (w *Worker) parseProgress(reader *bufio.Reader, taskID int64, totalDuration float64, workerID int, lastProgressUnix *int64) {
 	scanner := bufio.NewScanner(reader)
 	lastUpdate := time.Now()
 	lastProgress := 0.0
@@ -632,6 +716,8 @@ func (w *Worker) parseProgress(reader *bufio.Reader, taskID int64, totalDuration
 			if err != nil {
 				continue
 			}
+
+			atomic.StoreInt64(lastProgressUnix, time.Now().UnixNano())
 
 			if totalDuration > 0 {
 				// 计算百分比
@@ -658,12 +744,39 @@ func (w *Worker) parseProgress(reader *bufio.Reader, taskID int64, totalDuration
 			}
 		}
 	}
+}
 
-	// 最后确保进度设为100%
-	if totalDuration > 0 {
-		w.db.UpdateTaskProgress(taskID, 100.0)
-		log.Printf("[Worker-%d] 任务 #%d 已完成", workerID, taskID)
+func classifyError(errMsg string) (string, bool) {
+	lower := strings.ToLower(errMsg)
+
+	if strings.Contains(errMsg, "进度超过") || strings.Contains(errMsg, "FFmpeg超时") || strings.Contains(errMsg, "ffprobe超时") {
+		return "疑似IO卡住或进程超时", true
 	}
+	if strings.Contains(lower, "input/output error") ||
+		strings.Contains(lower, "i/o error") ||
+		strings.Contains(lower, "stale file handle") ||
+		strings.Contains(lower, "operation timed out") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "connection timed out") ||
+		strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "no such file") ||
+		strings.Contains(lower, "broken pipe") {
+		return "疑似IO/挂载盘问题", true
+	}
+	if strings.Contains(errMsg, "磁盘空间") {
+		return "磁盘空间不足", false
+	}
+	if strings.Contains(errMsg, "文件检查失败") ||
+		strings.Contains(errMsg, "文件损坏") ||
+		strings.Contains(errMsg, "解码测试失败") ||
+		strings.Contains(errMsg, "Invalid NAL") ||
+		strings.Contains(errMsg, "Error splitting") ||
+		strings.Contains(errMsg, "Invalid data found") ||
+		strings.Contains(errMsg, "moov atom not found") {
+		return "文件损坏或格式不支持", false
+	}
+
+	return "未知原因", false
 }
 
 // checkDiskSpace 检查磁盘空间
