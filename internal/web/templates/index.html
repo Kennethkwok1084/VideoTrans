@@ -173,6 +173,28 @@
         // 全局状态
         let workerStatus = null;
 
+        function getLogText(task) {
+            if (!task || !task.log) return '';
+            if (typeof task.log === 'string') return task.log;
+            if (task.log.Valid) return task.log.String || '';
+            return '';
+        }
+
+        function formatLogSnippet(text, maxLen) {
+            if (!text) return '';
+            if (text.length <= maxLen) return text;
+            return text.slice(0, maxLen) + '...';
+        }
+
+        function escapeHtml(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         // 加载监控目录列表
         async function loadDirectories() {
             try {
@@ -493,18 +515,25 @@
                 }
 
                 countEl.textContent = `${tasks.length} 个任务`;
-                container.innerHTML = tasks.map(task => `
+                container.innerHTML = tasks.map(task => {
+                    const logText = getLogText(task);
+                    const logSnippet = formatLogSnippet(logText, 120);
+                    const displayText = logSnippet || '未知错误';
+                    const titleText = logText || displayText;
+
+                    return `
                     <div class="flex items-center justify-between p-3 bg-red-50 rounded-lg border border-red-200">
                         <div class="flex-1 min-w-0">
                             <p class="text-sm font-medium text-gray-900 truncate">${task.source_path}</p>
-                            <p class="text-xs text-red-600 mt-1">${task.error_message || '未知错误'}</p>
+                            <p class="text-xs text-red-600 mt-1" title="${escapeHtml(titleText)}">${escapeHtml(displayText)}</p>
                         </div>
                         <button onclick="retryTask(${task.id})" 
                                 class="ml-4 px-3 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700 transition">
                             重试
                         </button>
                     </div>
-                `).join('');
+                `;
+                }).join('');
             } catch (err) {
                 console.error('加载失败任务失败:', err);
             }

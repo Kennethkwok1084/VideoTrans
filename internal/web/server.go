@@ -59,6 +59,7 @@ func (s *Server) setupRoutes() {
 	{
 		api.GET("/stats", s.handleGetStats)
 		api.GET("/tasks", s.handleGetTasks)
+		api.POST("/tasks/retry-failed", s.handleRetryFailedTasks)
 		api.POST("/scan", s.handleTriggerScan)
 		api.POST("/tasks/:id/retry", s.handleRetryTask)
 		api.DELETE("/tasks/:id", s.handleDeleteTask)
@@ -160,6 +161,20 @@ func (s *Server) handleRetryTask(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "任务已重置为待处理"})
+}
+
+// handleRetryFailedTasks 一键重试所有失败任务
+func (s *Server) handleRetryFailedTasks(c *gin.Context) {
+	count, err := s.db.ResetFailedTasksToPending()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "失败任务已重置为待处理",
+		"count":   count,
+	})
 }
 
 // handleDeleteTask 删除任务记录
