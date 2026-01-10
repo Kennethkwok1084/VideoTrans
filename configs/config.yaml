@@ -23,6 +23,11 @@ ffmpeg:
   audio_bitrate: "128k"
   extensions: [".mp4", ".mkv", ".avi", ".ts", ".mov", ".flv", ".wmv", ".m4v", ".webm"]
   strict_check: true  # 转码前严格检查文件完整性，跳过损坏文件
+  probe_timeout_seconds: 30
+  progress_stall_minutes: 10
+  max_duration_hours: 2
+  duration_factor: 2.0
+  duration_extra_minutes: 15
   # 排除规则（支持通配符）
   exclude_patterns:
     - "SYNOPHOTO_*"           # 群晖缩略图/视频

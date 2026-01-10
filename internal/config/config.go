@@ -47,14 +47,19 @@ type InputOutputPair struct {
 
 // FFmpegConfig FFmpeg配置
 type FFmpegConfig struct {
-	Codec           string   `yaml:"codec"`
-	Preset          string   `yaml:"preset"`
-	CRF             int      `yaml:"crf"`
-	Audio           string   `yaml:"audio"`
-	AudioBitrate    string   `yaml:"audio_bitrate"`
-	Extensions      []string `yaml:"extensions"`
-	ExcludePatterns []string `yaml:"exclude_patterns"`
-	StrictCheck     bool     `yaml:"strict_check"` // 是否启用严格文件检查（检测损坏文件）
+	Codec                 string   `yaml:"codec"`
+	Preset                string   `yaml:"preset"`
+	CRF                   int      `yaml:"crf"`
+	Audio                 string   `yaml:"audio"`
+	AudioBitrate          string   `yaml:"audio_bitrate"`
+	Extensions            []string `yaml:"extensions"`
+	ExcludePatterns       []string `yaml:"exclude_patterns"`
+	StrictCheck           bool     `yaml:"strict_check"` // 是否启用严格文件检查（检测损坏文件）
+	ProbeTimeoutSeconds   int      `yaml:"probe_timeout_seconds"`
+	ProgressStallMinutes  int      `yaml:"progress_stall_minutes"`
+	MaxDurationHours      int      `yaml:"max_duration_hours"`
+	DurationFactor        float64  `yaml:"duration_factor"`
+	DurationExtraMinutes  int      `yaml:"duration_extra_minutes"`
 }
 
 // CleaningConfig 清理配置
@@ -173,6 +178,38 @@ func (c *Config) Validate() error {
 	if !c.FFmpeg.StrictCheck {
 		// 默认不启用（已废弃，现在默认启用）
 		// 保持向后兼容，如果配置文件中未指定，默认为 true
+	}
+
+	if c.FFmpeg.ProbeTimeoutSeconds < 0 {
+		return fmt.Errorf("probe_timeout_seconds 不能为负数")
+	}
+	if c.FFmpeg.ProgressStallMinutes < 0 {
+		return fmt.Errorf("progress_stall_minutes 不能为负数")
+	}
+	if c.FFmpeg.MaxDurationHours < 0 {
+		return fmt.Errorf("max_duration_hours 不能为负数")
+	}
+	if c.FFmpeg.DurationFactor < 0 {
+		return fmt.Errorf("duration_factor 不能为负数")
+	}
+	if c.FFmpeg.DurationExtraMinutes < 0 {
+		return fmt.Errorf("duration_extra_minutes 不能为负数")
+	}
+
+	if c.FFmpeg.ProbeTimeoutSeconds == 0 {
+		c.FFmpeg.ProbeTimeoutSeconds = 30
+	}
+	if c.FFmpeg.ProgressStallMinutes == 0 {
+		c.FFmpeg.ProgressStallMinutes = 10
+	}
+	if c.FFmpeg.MaxDurationHours == 0 {
+		c.FFmpeg.MaxDurationHours = 2
+	}
+	if c.FFmpeg.DurationFactor == 0 {
+		c.FFmpeg.DurationFactor = 2.0
+	}
+	if c.FFmpeg.DurationExtraMinutes == 0 {
+		c.FFmpeg.DurationExtraMinutes = 15
 	}
 
 	return nil
