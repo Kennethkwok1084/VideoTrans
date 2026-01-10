@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -33,6 +34,7 @@ type Worker struct {
 	cancelWorkers  context.CancelFunc
 	workersStopped bool
 	mainCtx        context.Context // 主 context，用于启动 Worker
+	activeTasks    int64
 }
 
 // New 创建Worker实例
@@ -144,6 +146,10 @@ func (w *Worker) GetMaxWorkers() int {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.maxWorkers
+}
+
+func (w *Worker) getActiveTasks() int64 {
+	return atomic.LoadInt64(&w.activeTasks)
 }
 
 // SetMaxWorkers 设置最大Worker数量（运行时动态调整）
@@ -292,6 +298,13 @@ func (w *Worker) adjustWorkerPool(ctx context.Context, targetCount int) {
 		// 设置标志：不再接受新任务（调度器会检查这个）
 		w.workersStopped = true
 
+		activeTasks := w.getActiveTasks()
+		queuedTasks := len(w.taskQueue)
+		if activeTasks > 0 || queuedTasks > 0 {
+			log.Printf("[WorkerPool] 非工作时间，等待任务完成后停止 (active=%d, queued=%d)", activeTasks, queuedTasks)
+			return
+		}
+
 		// 关闭任务队列，通知workers不再有新任务
 		// 但不取消context，让正在执行的任务继续完成
 		close(w.taskQueue)
@@ -342,81 +355,86 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 
 			log.Printf("[Worker-%d] 开始处理任务 #%d: %s", workerID, task.ID, task.SourcePath)
 
-			// 记录开始时间
-			startTime := time.Now()
+			atomic.AddInt64(&w.activeTasks, 1)
+			func() {
+				defer atomic.AddInt64(&w.activeTasks, -1)
 
-			// 更新状态为处理中
-			if err := w.db.UpdateTaskStatus(task.ID, database.StatusProcessing, ""); err != nil {
-				log.Printf("[Worker-%d] 更新任务状态失败: %v", workerID, err)
-				continue
-			}
+				// 记录开始时间
+				startTime := time.Now()
 
-			// 执行转码（使用独立的 context，不受 ctx.Done() 影响）
-			taskCtx := context.Background()
-			if err := w.transcode(taskCtx, task, workerID); err != nil {
-				// 详细的错误日志
-				errMsg := err.Error()
-				log.Printf("[Worker-%d] ❌ 转码失败 #%d: %s", workerID, task.ID, task.SourcePath)
-
-				// 判断错误类型并给出提示
-				if strings.Contains(errMsg, "文件损坏") || strings.Contains(errMsg, "解码测试失败") {
-					log.Printf("[Worker-%d] 🔍 源文件损坏或格式不支持，建议检查: %s", workerID, task.SourcePath)
-				} else if strings.Contains(errMsg, "磁盘空间") {
-					log.Printf("[Worker-%d] 💾 磁盘空间不足，转码中止", workerID)
-				} else if strings.Contains(errMsg, "FFmpeg执行失败") {
-					// 截取关键错误信息（避免日志过长）
-					if len(errMsg) > 1000 {
-						log.Printf("[Worker-%d] 📋 FFmpeg错误 (前500字符): %s", workerID, errMsg[:500])
-					} else {
-						log.Printf("[Worker-%d] 📋 错误详情: %s", workerID, errMsg)
-					}
+				// 更新状态为处理中
+				if err := w.db.UpdateTaskStatus(task.ID, database.StatusProcessing, ""); err != nil {
+					log.Printf("[Worker-%d] 更新任务状态失败: %v", workerID, err)
+					return
 				}
 
-				// 增加重试次数
-				w.db.IncrementRetryCount(task.ID)
+				// 执行转码（使用独立的 context，不受 ctx.Done() 影响）
+				taskCtx := context.Background()
+				if err := w.transcode(taskCtx, task, workerID); err != nil {
+					// 详细的错误日志
+					errMsg := err.Error()
+					log.Printf("[Worker-%d] ❌ 转码失败 #%d: %s", workerID, task.ID, task.SourcePath)
 
-				// 更新状态为失败（存储完整错误信息到数据库）
-				w.db.UpdateTaskStatus(task.ID, database.StatusFailed, errMsg)
-
-				// 更新 Prometheus metrics
-				metrics.TranscodeFailed.Inc()
-			} else {
-				log.Printf("[Worker-%d] ✅ 转码成功 #%d: %s", workerID, task.ID, task.SourcePath)
-
-				// 更新输出文件大小 - 单次遍历获取输出路径
-				var outputDir, relPath string
-				pairs := w.config.GetPairs()
-				for _, pair := range pairs {
-					if rel, err := filepath.Rel(pair.Input, task.SourcePath); err == nil && !strings.HasPrefix(rel, "..") {
-						outputDir = pair.Output
-						relPath = rel
-						break
-					}
-				}
-
-				if outputDir != "" && relPath != "" {
-					outputPath := filepath.Join(outputDir, relPath)
-					if info, err := os.Stat(outputPath); err == nil {
-						w.db.UpdateTaskOutputSize(task.ID, info.Size())
-
-						// 计算节省的空间
-						if task.SourceSize > 0 {
-							savedBytes := task.SourceSize - info.Size()
-							metrics.SpaceSaved.Add(float64(savedBytes))
+					// 判断错误类型并给出提示
+					if strings.Contains(errMsg, "文件损坏") || strings.Contains(errMsg, "解码测试失败") {
+						log.Printf("[Worker-%d] 🔍 源文件损坏或格式不支持，建议检查: %s", workerID, task.SourcePath)
+					} else if strings.Contains(errMsg, "磁盘空间") {
+						log.Printf("[Worker-%d] 💾 磁盘空间不足，转码中止", workerID)
+					} else if strings.Contains(errMsg, "FFmpeg执行失败") {
+						// 截取关键错误信息（避免日志过长）
+						if len(errMsg) > 1000 {
+							log.Printf("[Worker-%d] 📋 FFmpeg错误 (前500字符): %s", workerID, errMsg[:500])
+						} else {
+							log.Printf("[Worker-%d] 📋 错误详情: %s", workerID, errMsg)
 						}
 					}
+
+					// 增加重试次数
+					w.db.IncrementRetryCount(task.ID)
+
+					// 更新状态为失败（存储完整错误信息到数据库）
+					w.db.UpdateTaskStatus(task.ID, database.StatusFailed, errMsg)
+
+					// 更新 Prometheus metrics
+					metrics.TranscodeFailed.Inc()
+				} else {
+					log.Printf("[Worker-%d] ✅ 转码成功 #%d: %s", workerID, task.ID, task.SourcePath)
+
+					// 更新输出文件大小 - 单次遍历获取输出路径
+					var outputDir, relPath string
+					pairs := w.config.GetPairs()
+					for _, pair := range pairs {
+						if rel, err := filepath.Rel(pair.Input, task.SourcePath); err == nil && !strings.HasPrefix(rel, "..") {
+							outputDir = pair.Output
+							relPath = rel
+							break
+						}
+					}
+
+					if outputDir != "" && relPath != "" {
+						outputPath := filepath.Join(outputDir, relPath)
+						if info, err := os.Stat(outputPath); err == nil {
+							w.db.UpdateTaskOutputSize(task.ID, info.Size())
+
+							// 计算节省的空间
+							if task.SourceSize > 0 {
+								savedBytes := task.SourceSize - info.Size()
+								metrics.SpaceSaved.Add(float64(savedBytes))
+							}
+						}
+					}
+
+					// 更新状态为完成
+					w.db.UpdateTaskStatus(task.ID, database.StatusCompleted, "转码成功")
+
+					// 更新 Prometheus metrics
+					metrics.TranscodeSuccess.Inc()
+
+					// 记录转码耗时
+					duration := time.Since(startTime).Seconds()
+					metrics.TranscodeDuration.Observe(duration)
 				}
-
-				// 更新状态为完成
-				w.db.UpdateTaskStatus(task.ID, database.StatusCompleted, "转码成功")
-
-				// 更新 Prometheus metrics
-				metrics.TranscodeSuccess.Inc()
-
-				// 记录转码耗时
-				duration := time.Since(startTime).Seconds()
-				metrics.TranscodeDuration.Observe(duration)
-			}
+			}()
 		}
 	}
 }
