@@ -302,6 +302,26 @@ func (db *DB) ResetFailedTasksToPending() (int64, error) {
 	return rows, nil
 }
 
+// ResetProcessingTasksToPending 批量重置处理中任务为待处理
+func (db *DB) ResetProcessingTasksToPending() (int64, error) {
+	query := `
+		UPDATE tasks
+		SET status = ?, retry_count = 0, progress = 0, completed_at = NULL, log = ?
+		WHERE status = ?
+	`
+	result, err := db.conn.Exec(query, StatusPending, "恢复未完成任务", StatusProcessing)
+	if err != nil {
+		return 0, err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	return rows, nil
+}
+
 // GetStats 获取统计信息
 func (db *DB) GetStats() (*Stats, error) {
 	query := `

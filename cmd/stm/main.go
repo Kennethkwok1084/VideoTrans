@@ -42,6 +42,11 @@ func main() {
 	}
 	defer db.Close()
 	log.Println("[Main] 数据库初始化成功")
+	if count, err := db.ResetProcessingTasksToPending(); err != nil {
+		log.Printf("[Main] 恢复未完成任务失败: %v", err)
+	} else if count > 0 {
+		log.Printf("[Main] 已恢复 %d 个未完成任务为待处理", count)
+	}
 
 	// 创建各模块实例
 	scan := scanner.New(cfg, db)
