@@ -564,6 +564,9 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 			case <-stallTicker.C:
 				last := time.Unix(0, atomic.LoadInt64(&lastProgressUnix))
 				if time.Since(last) > progressStall {
+					if cmd.Process != nil {
+						w.logStallDiagnostics(workerID, task, inputPath, outputPath, cmd.Process.Pid, last)
+					}
 					stallReasonCh <- fmt.Sprintf("FFmpeg进度超过%v未更新，疑似IO卡住", progressStall)
 					cancel()
 					return
@@ -777,6 +780,108 @@ func classifyError(errMsg string) (string, bool) {
 	}
 
 	return "未知原因", false
+}
+
+type mountInfo struct {
+	Source  string
+	Target  string
+	FSType  string
+	Options string
+}
+
+func (w *Worker) logStallDiagnostics(workerID int, task *database.Task, inputPath, outputPath string, pid int, lastProgress time.Time) {
+	log.Printf("[Worker-%d] 🧾 卡住诊断: task=%d pid=%d last_progress=%s input=%s output=%s",
+		workerID, task.ID, pid, lastProgress.Format(time.RFC3339), inputPath, outputPath)
+
+	if info, err := findMountInfo(inputPath); err == nil && info != nil {
+		log.Printf("[Worker-%d] 📁 输入挂载: source=%s target=%s type=%s options=%s",
+			workerID, info.Source, info.Target, info.FSType, info.Options)
+	}
+	if info, err := findMountInfo(outputPath); err == nil && info != nil {
+		log.Printf("[Worker-%d] 📁 输出挂载: source=%s target=%s type=%s options=%s",
+			workerID, info.Source, info.Target, info.FSType, info.Options)
+	}
+
+	if stat, err := os.Stat(inputPath); err == nil {
+		log.Printf("[Worker-%d] 📄 输入文件: size=%d mtime=%s mode=%s",
+			workerID, stat.Size(), stat.ModTime().Format(time.RFC3339), stat.Mode().String())
+	} else {
+		log.Printf("[Worker-%d] 📄 输入文件: stat失败: %v", workerID, err)
+	}
+
+	procRoot := fmt.Sprintf("/proc/%d", pid)
+	if snippet := readProcSnippet(filepath.Join(procRoot, "wchan"), 200); snippet != "" {
+		log.Printf("[Worker-%d] 🔎 ffmpeg wchan: %s", workerID, snippet)
+	}
+	if snippet := readProcSnippet(filepath.Join(procRoot, "status"), 600); snippet != "" {
+		log.Printf("[Worker-%d] 🔎 ffmpeg status: %s", workerID, snippet)
+	}
+	if snippet := readProcSnippet(filepath.Join(procRoot, "io"), 400); snippet != "" {
+		log.Printf("[Worker-%d] 🔎 ffmpeg io: %s", workerID, snippet)
+	}
+}
+
+func readProcSnippet(path string, maxLen int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	text := strings.TrimSpace(string(data))
+	if maxLen > 0 && len(text) > maxLen {
+		return text[:maxLen] + "..."
+	}
+	return text
+}
+
+func findMountInfo(path string) (*mountInfo, error) {
+	data, err := os.ReadFile("/proc/self/mounts")
+	if err != nil {
+		return nil, err
+	}
+
+	bestLen := -1
+	var best *mountInfo
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+
+		source := unescapeMountField(fields[0])
+		target := unescapeMountField(fields[1])
+		fstype := fields[2]
+		options := fields[3]
+
+		if target == "/" || target == "" {
+			if bestLen < 1 && strings.HasPrefix(path, "/") {
+				bestLen = 1
+				best = &mountInfo{Source: source, Target: target, FSType: fstype, Options: options}
+			}
+			continue
+		}
+
+		if path == target || strings.HasPrefix(path, target+"/") {
+			if len(target) > bestLen {
+				bestLen = len(target)
+				best = &mountInfo{Source: source, Target: target, FSType: fstype, Options: options}
+			}
+		}
+	}
+
+	return best, nil
+}
+
+func unescapeMountField(value string) string {
+	replacer := strings.NewReplacer(
+		`\\040`, " ",
+		`\\011`, "\t",
+		`\\012`, "\n",
+		`\\134`, "\\",
+	)
+	return replacer.Replace(value)
 }
 
 // checkDiskSpace 检查磁盘空间
