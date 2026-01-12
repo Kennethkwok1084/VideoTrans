@@ -122,7 +122,15 @@ func (s *Server) handleGetTasks(c *gin.Context) {
 	}
 	offset := (page - 1) * limit
 
-	tasks, err := s.db.GetAllTasks(status, limit, offset)
+	var (
+		tasks []*database.Task
+		err   error
+	)
+	if status == "scan_error" {
+		tasks, err = s.db.GetScanErrorTasks(limit, offset)
+	} else {
+		tasks, err = s.db.GetAllTasks(status, limit, offset)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

@@ -604,8 +604,20 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 	}
 
 	if w.config.FFmpeg.StrictCheck {
-		if err := media.ProbeFile(outputTempPath, probeTimeout, 2); err != nil {
+		if err := media.ProbeFile(outputTempPath, probeTimeout, 0); err != nil {
 			return fmt.Errorf("输出文件验证失败: %w", err)
+		}
+
+		decodeSeconds := w.config.FFmpeg.VerifyDecodeSeconds
+		if decodeSeconds > 0 {
+			if err := media.DecodeSegment(outputTempPath, probeTimeout, 0, decodeSeconds); err != nil {
+				return fmt.Errorf("输出文件验证失败: %w", err)
+			}
+			if w.config.FFmpeg.VerifyTailSeekSeconds > 0 {
+				if err := media.DecodeSegment(outputTempPath, probeTimeout, w.config.FFmpeg.VerifyTailSeekSeconds, decodeSeconds); err != nil {
+					return fmt.Errorf("输出文件验证失败: %w", err)
+				}
+			}
 		}
 	}
 
@@ -717,6 +729,9 @@ func classifyError(errMsg string) (string, bool) {
 
 	if strings.Contains(errMsg, "进度超过") || strings.Contains(errMsg, "FFmpeg超时") || strings.Contains(errMsg, "ffprobe超时") {
 		return "疑似IO卡住或进程超时", true
+	}
+	if strings.Contains(errMsg, "输出文件验证失败") {
+		return "输出文件损坏，自动重试", true
 	}
 	if strings.Contains(lower, "input/output error") ||
 		strings.Contains(lower, "i/o error") ||

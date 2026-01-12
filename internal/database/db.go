@@ -403,6 +403,48 @@ func (db *DB) GetAllTasks(status string, limit, offset int) ([]*Task, error) {
 	return tasks, rows.Err()
 }
 
+// GetScanErrorTasks 获取输出校验/扫描发现异常的任务
+func (db *DB) GetScanErrorTasks(limit, offset int) ([]*Task, error) {
+	query := `
+		SELECT id, source_path, source_mtime, source_size, status, retry_count,
+		       progress, output_size, created_at, completed_at, log
+		FROM tasks
+		WHERE status != ? AND COALESCE(log, '') LIKE ?
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?
+	`
+
+	rows, err := db.conn.Query(query, StatusCompleted, "%输出文件%", limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []*Task
+	for rows.Next() {
+		task := &Task{}
+		err := rows.Scan(
+			&task.ID,
+			&task.SourcePath,
+			&task.SourceMtime,
+			&task.SourceSize,
+			&task.Status,
+			&task.RetryCount,
+			&task.Progress,
+			&task.OutputSize,
+			&task.CreatedAt,
+			&task.CompletedAt,
+			&task.Log,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+
+	return tasks, rows.Err()
+}
+
 // DeleteTask 删除任务记录
 func (db *DB) DeleteTask(id int64) error {
 	query := `DELETE FROM tasks WHERE id = ?`
