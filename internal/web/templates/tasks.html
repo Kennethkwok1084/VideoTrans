@@ -46,6 +46,9 @@
                     <button onclick="filterTasks('failed')" id="btnFailed" class="filter-btn">
                         失败
                     </button>
+                    <button onclick="filterTasks('scan_error')" id="btnScanError" class="filter-btn">
+                        扫描异常
+                    </button>
                 </div>
                 <div class="flex items-center space-x-3">
                     <button id="btnRetryFailed" onclick="retryFailed()"
@@ -216,6 +219,7 @@
                     const logSnippet = formatLogSnippet(logText, 120);
                     const errorText = logSnippet || '未知错误';
                     const errorTitle = logText || errorText;
+                    const showScanError = currentFilter === 'scan_error' && logText;
 
                     return `
                         <tr class="hover:bg-gray-50">
@@ -231,6 +235,9 @@
                                 ${getStatusBadge(task.status)}
                                 ${task.status === 'failed'
                             ? `<div class="text-xs text-red-600 mt-1" title="${escapeHtml(errorTitle)}">${escapeHtml(errorText)}</div>`
+                            : ''}
+                                ${showScanError
+                            ? `<div class="text-xs text-orange-600 mt-1" title="${escapeHtml(errorTitle)}">${escapeHtml(errorText)}</div>`
                             : ''}
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap">
@@ -283,7 +290,19 @@
             document.querySelectorAll('.filter-btn').forEach(btn => {
                 btn.classList.remove('active');
             });
-            document.getElementById(`btn${status.charAt(0).toUpperCase() + status.slice(1)}`).classList.add('active');
+            const btnMap = {
+                'all': 'btnAll',
+                'pending': 'btnPending',
+                'processing': 'btnProcessing',
+                'completed': 'btnCompleted',
+                'failed': 'btnFailed',
+                'scan_error': 'btnScanError'
+            };
+            const btnId = btnMap[status] || 'btnAll';
+            const targetBtn = document.getElementById(btnId);
+            if (targetBtn) {
+                targetBtn.classList.add('active');
+            }
 
             updateFilterActions();
             loadTasks();
