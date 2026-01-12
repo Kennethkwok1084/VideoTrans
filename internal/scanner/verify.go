@@ -96,6 +96,39 @@ func (s *Scanner) verifyCompletedOutputs(ctx context.Context) error {
 				continue
 			}
 
+			decodeSeconds := s.config.FFmpeg.VerifyDecodeSeconds
+			if decodeSeconds > 0 {
+				if err := media.DecodeSegment(checkPath, probeTimeout, 0, decodeSeconds); err != nil {
+					log.Printf("[Scanner] 输出文件损坏: %s, err=%v", checkPath, err)
+					if removeErr := os.Remove(checkPath); removeErr != nil {
+						log.Printf("[Scanner] 删除损坏输出失败 %s: %v", checkPath, removeErr)
+						continue
+					}
+					if err := s.resetTaskForRecode(task, "输出文件损坏，已删除并重新转码"); err != nil {
+						log.Printf("[Scanner] 重置任务失败 %s: %v", task.SourcePath, err)
+						continue
+					}
+					requeued++
+					continue
+				}
+			}
+
+			if decodeSeconds > 0 && s.config.FFmpeg.VerifyTailSeekSeconds > 0 {
+				if err := media.DecodeSegment(checkPath, probeTimeout, s.config.FFmpeg.VerifyTailSeekSeconds, decodeSeconds); err != nil {
+					log.Printf("[Scanner] 输出文件损坏: %s, err=%v", checkPath, err)
+					if removeErr := os.Remove(checkPath); removeErr != nil {
+						log.Printf("[Scanner] 删除损坏输出失败 %s: %v", checkPath, removeErr)
+						continue
+					}
+					if err := s.resetTaskForRecode(task, "输出文件损坏，已删除并重新转码"); err != nil {
+						log.Printf("[Scanner] 重置任务失败 %s: %v", task.SourcePath, err)
+						continue
+					}
+					requeued++
+					continue
+				}
+			}
+
 			checked++
 		}
 

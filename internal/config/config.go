@@ -53,6 +53,8 @@ type FFmpegConfig struct {
 	Audio                 string   `yaml:"audio"`
 	AudioBitrate          string   `yaml:"audio_bitrate"`
 	OutputExtension       string   `yaml:"output_extension"`
+	VerifyDecodeSeconds   int      `yaml:"verify_decode_seconds"`
+	VerifyTailSeekSeconds int      `yaml:"verify_tail_seek_seconds"`
 	Extensions            []string `yaml:"extensions"`
 	ExcludePatterns       []string `yaml:"exclude_patterns"`
 	StrictCheck           bool     `yaml:"strict_check"` // 是否启用严格文件检查（检测损坏文件）
@@ -184,6 +186,12 @@ func (c *Config) Validate() error {
 	if c.FFmpeg.ProbeTimeoutSeconds < 0 {
 		return fmt.Errorf("probe_timeout_seconds 不能为负数")
 	}
+	if c.FFmpeg.VerifyDecodeSeconds < 0 {
+		return fmt.Errorf("verify_decode_seconds 不能为负数")
+	}
+	if c.FFmpeg.VerifyTailSeekSeconds < 0 {
+		return fmt.Errorf("verify_tail_seek_seconds 不能为负数")
+	}
 	if c.FFmpeg.ProgressStallMinutes < 0 {
 		return fmt.Errorf("progress_stall_minutes 不能为负数")
 	}
@@ -199,6 +207,9 @@ func (c *Config) Validate() error {
 
 	if c.FFmpeg.ProbeTimeoutSeconds == 0 {
 		c.FFmpeg.ProbeTimeoutSeconds = 30
+	}
+	if c.FFmpeg.VerifyDecodeSeconds == 0 {
+		c.FFmpeg.VerifyDecodeSeconds = 2
 	}
 	if c.FFmpeg.ProgressStallMinutes == 0 {
 		c.FFmpeg.ProgressStallMinutes = 10
