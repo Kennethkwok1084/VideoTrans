@@ -24,6 +24,11 @@ ffmpeg:
   output_extension: ".mp4"  # 统一输出容器，提升兼容性
   verify_decode_seconds: 2  # 输出校验解码时长（秒）
   verify_tail_seek_seconds: 10  # 从末尾回退秒数，抽样校验尾部（0为关闭）
+  discard_corrupt: true  # 解码时丢弃损坏帧，避免空帧
+  corrupt_strategy: "auto"  # auto=少量损坏丢帧，多则补帧；discard=只丢帧；cfr=只补帧
+  corrupt_probe_seconds: 30  # 抽样检测时长（秒）
+  corrupt_error_threshold: 5  # 抽样错误行数阈值
+  output_fps: 30  # 补帧时输出帧率
   extensions: [".mp4", ".mkv", ".avi", ".ts", ".mov", ".flv", ".wmv", ".m4v", ".webm"]
   strict_check: true  # 转码前严格检查文件完整性，跳过损坏文件
   probe_timeout_seconds: 30

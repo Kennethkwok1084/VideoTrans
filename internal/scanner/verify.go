@@ -98,7 +98,7 @@ func (s *Scanner) verifyCompletedOutputs(ctx context.Context) error {
 
 			decodeSeconds := s.config.FFmpeg.VerifyDecodeSeconds
 			if decodeSeconds > 0 {
-				if err := media.DecodeSegment(checkPath, probeTimeout, 0, decodeSeconds); err != nil {
+				if err := media.DecodeSegmentStrict(checkPath, probeTimeout, 0, decodeSeconds); err != nil {
 					log.Printf("[Scanner] 输出文件损坏: %s, err=%v", checkPath, err)
 					if removeErr := os.Remove(checkPath); removeErr != nil {
 						log.Printf("[Scanner] 删除损坏输出失败 %s: %v", checkPath, removeErr)
@@ -114,7 +114,7 @@ func (s *Scanner) verifyCompletedOutputs(ctx context.Context) error {
 			}
 
 			if decodeSeconds > 0 && s.config.FFmpeg.VerifyTailSeekSeconds > 0 {
-				if err := media.DecodeSegment(checkPath, probeTimeout, s.config.FFmpeg.VerifyTailSeekSeconds, decodeSeconds); err != nil {
+				if err := media.DecodeSegmentStrict(checkPath, probeTimeout, s.config.FFmpeg.VerifyTailSeekSeconds, decodeSeconds); err != nil {
 					log.Printf("[Scanner] 输出文件损坏: %s, err=%v", checkPath, err)
 					if removeErr := os.Remove(checkPath); removeErr != nil {
 						log.Printf("[Scanner] 删除损坏输出失败 %s: %v", checkPath, removeErr)
