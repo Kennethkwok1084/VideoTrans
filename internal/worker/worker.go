@@ -18,6 +18,7 @@ import (
 
 	"github.com/stm/video-transcoder/internal/config"
 	"github.com/stm/video-transcoder/internal/database"
+	"github.com/stm/video-transcoder/internal/media"
 	"github.com/stm/video-transcoder/internal/metrics"
 )
 
@@ -420,7 +421,7 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 					}
 
 					if outputDir != "" && relPath != "" {
-						outputPath := filepath.Join(outputDir, relPath)
+						outputPath := w.config.ApplyOutputExtension(filepath.Join(outputDir, relPath))
 						if info, err := os.Stat(outputPath); err == nil {
 							w.db.UpdateTaskOutputSize(task.ID, info.Size())
 
@@ -472,8 +473,8 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		return fmt.Errorf("无法找到源文件对应的输入输出配对: %s", inputPath)
 	}
 
-	// 构建输出路径（保持目录结构）
-	outputPath := filepath.Join(outputDir, relPath)
+	// 构建输出路径（保持目录结构，必要时统一扩展名）
+	outputPath := w.config.ApplyOutputExtension(filepath.Join(outputDir, relPath))
 
 	// 确保输出目录存在
 	outputPathDir := filepath.Dir(outputPath)
@@ -487,7 +488,8 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 	}
 
 	// 使用ffprobe检查文件完整性
-	if err := w.probeFile(inputPath); err != nil {
+	probeTimeout := time.Duration(w.config.FFmpeg.ProbeTimeoutSeconds) * time.Second
+	if err := media.ProbeFile(inputPath, probeTimeout, 2); err != nil {
 		return fmt.Errorf("文件检查失败: %w", err)
 	}
 
@@ -498,6 +500,14 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		duration = 0
 	}
 
+	outputTempPath := outputPath + ".stm_tmp"
+	success := false
+	defer func() {
+		if !success {
+			_ = os.Remove(outputTempPath)
+		}
+	}()
+
 	// 构建FFmpeg命令
 	args := []string{
 		"-y",                  // 覆盖输出文件
@@ -506,10 +516,11 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		"-c:v", w.config.FFmpeg.Codec, // 视频编码器
 		"-preset", w.config.FFmpeg.Preset, // 预设
 		"-crf", strconv.Itoa(w.config.FFmpeg.CRF), // CRF质量
+		"-pix_fmt", "yuv420p", // 提高兼容性
 		"-c:a", w.config.FFmpeg.Audio, // 音频编码器
 		"-b:a", w.config.FFmpeg.AudioBitrate, // 音频比特率
 		"-movflags", "+faststart", // 优化流式播放
-		outputPath, // 输出文件
+		outputTempPath, // 输出文件（临时）
 	}
 
 	maxDuration := computeFfmpegTimeout(duration, w.config)
@@ -565,7 +576,7 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 				last := time.Unix(0, atomic.LoadInt64(&lastProgressUnix))
 				if time.Since(last) > progressStall {
 					if cmd.Process != nil {
-						w.logStallDiagnostics(workerID, task, inputPath, outputPath, cmd.Process.Pid, last)
+						w.logStallDiagnostics(workerID, task, inputPath, outputTempPath, cmd.Process.Pid, last)
 					}
 					stallReasonCh <- fmt.Sprintf("FFmpeg进度超过%v未更新，疑似IO卡住", progressStall)
 					cancel()
@@ -592,69 +603,21 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		return fmt.Errorf("FFmpeg执行失败: %w\n日志:\n%s", err, stderrBuf.String())
 	}
 
-	return nil
-}
-
-// probeFile 使用ffprobe检查文件
-func (w *Worker) probeFile(path string) error {
-	// 增强检查：同时验证视频流和音频流
-	probeTimeout := time.Duration(w.config.FFmpeg.ProbeTimeoutSeconds) * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "ffprobe",
-		"-v", "error",
-		"-select_streams", "v:0", // 检查第一个视频流
-		"-show_entries", "stream=codec_name,duration",
-		"-of", "default=noprint_wrappers=1",
-		path,
-	)
-
-	output, err := cmd.CombinedOutput()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("ffprobe超时(%s): %w", probeTimeout, ctx.Err())
-	}
-	if err != nil {
-		return fmt.Errorf("视频流检查失败 (文件可能损坏): %w, output: %s", err, string(output))
-	}
-
-	// 检查输出是否为空
-	if len(output) == 0 {
-		return fmt.Errorf("无法检测到有效的视频流")
-	}
-
-	// 额外检查：尝试解码前几帧
-	decodeCtx, decodeCancel := context.WithTimeout(context.Background(), probeTimeout)
-	defer decodeCancel()
-
-	decodeCmd := exec.CommandContext(decodeCtx, "ffmpeg",
-		"-v", "error",
-		"-t", "2", // 只检查前2秒
-		"-i", path,
-		"-f", "null",
-		"-",
-	)
-
-	decodeOutput, decodeErr := decodeCmd.CombinedOutput()
-	if errors.Is(decodeCtx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("解码测试超时(%s): %w", probeTimeout, decodeCtx.Err())
-	}
-	if decodeErr != nil {
-		// 检查是否有解码错误
-		errMsg := string(decodeOutput)
-		if strings.Contains(errMsg, "Invalid") || strings.Contains(errMsg, "Error") {
-			return fmt.Errorf("文件解码测试失败 (文件损坏或格式不支持): %s", errMsg[:min(500, len(errMsg))])
+	if w.config.FFmpeg.StrictCheck {
+		if err := media.ProbeFile(outputTempPath, probeTimeout, 2); err != nil {
+			return fmt.Errorf("输出文件验证失败: %w", err)
 		}
 	}
 
-	return nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
+	if err := os.Rename(outputTempPath, outputPath); err != nil {
+		_ = os.Remove(outputPath)
+		if renameErr := os.Rename(outputTempPath, outputPath); renameErr != nil {
+			return fmt.Errorf("移动输出文件失败: %w", renameErr)
+		}
 	}
-	return b
+
+	success = true
+	return nil
 }
 
 // getDuration 获取视频时长（秒）

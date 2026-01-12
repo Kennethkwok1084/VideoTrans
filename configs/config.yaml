@@ -21,6 +21,7 @@ ffmpeg:
   crf: 28
   audio: "aac"
   audio_bitrate: "128k"
+  output_extension: ".mp4"  # 统一输出容器，提升兼容性
   extensions: [".mp4", ".mkv", ".avi", ".ts", ".mov", ".flv", ".wmv", ".m4v", ".webm"]
   strict_check: true  # 转码前严格检查文件完整性，跳过损坏文件
   probe_timeout_seconds: 30

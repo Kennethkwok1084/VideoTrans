@@ -60,6 +60,10 @@ func (s *Scanner) Scan(ctx context.Context) error {
 	log.Printf("[Scanner] 扫描完成，耗时: %v，新增: %d, 更新: %d, 跳过: %d",
 		elapsed, totalNew, totalUpdate, totalSkip)
 
+	if err := s.verifyCompletedOutputs(ctx); err != nil {
+		log.Printf("[Scanner] 输出校验失败: %v", err)
+	}
+
 	return nil
 }
 
@@ -193,9 +197,15 @@ func (s *Scanner) processFile(fullPath, relPath, outputDir string, mtime time.Ti
 	// 情况3: 已完成且目标文件存在
 	if task.Status == database.StatusCompleted {
 		// 使用配对的输出目录而非全局配置
-		targetPath := filepath.Join(outputDir, relPath)
+		basePath := filepath.Join(outputDir, relPath)
+		targetPath := s.config.ApplyOutputExtension(basePath)
 		if _, err := os.Stat(targetPath); err == nil {
 			return "skip"
+		}
+		if targetPath != basePath {
+			if _, err := os.Stat(basePath); err == nil {
+				return "skip"
+			}
 		}
 		// 目标文件不存在，重置任务
 		log.Printf("[Scanner] 目标文件丢失，重置任务: %s", relPath)
