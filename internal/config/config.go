@@ -55,6 +55,11 @@ type FFmpegConfig struct {
 	OutputExtension       string   `yaml:"output_extension"`
 	VerifyDecodeSeconds   int      `yaml:"verify_decode_seconds"`
 	VerifyTailSeekSeconds int      `yaml:"verify_tail_seek_seconds"`
+	DiscardCorrupt        bool     `yaml:"discard_corrupt"`
+	CorruptStrategy       string   `yaml:"corrupt_strategy"`
+	CorruptProbeSeconds   int      `yaml:"corrupt_probe_seconds"`
+	CorruptErrorThreshold int      `yaml:"corrupt_error_threshold"`
+	OutputFPS             int      `yaml:"output_fps"`
 	Extensions            []string `yaml:"extensions"`
 	ExcludePatterns       []string `yaml:"exclude_patterns"`
 	StrictCheck           bool     `yaml:"strict_check"` // 是否启用严格文件检查（检测损坏文件）
@@ -192,6 +197,15 @@ func (c *Config) Validate() error {
 	if c.FFmpeg.VerifyTailSeekSeconds < 0 {
 		return fmt.Errorf("verify_tail_seek_seconds 不能为负数")
 	}
+	if c.FFmpeg.CorruptProbeSeconds < 0 {
+		return fmt.Errorf("corrupt_probe_seconds 不能为负数")
+	}
+	if c.FFmpeg.CorruptErrorThreshold < 0 {
+		return fmt.Errorf("corrupt_error_threshold 不能为负数")
+	}
+	if c.FFmpeg.OutputFPS < 0 {
+		return fmt.Errorf("output_fps 不能为负数")
+	}
 	if c.FFmpeg.ProgressStallMinutes < 0 {
 		return fmt.Errorf("progress_stall_minutes 不能为负数")
 	}
@@ -210,6 +224,23 @@ func (c *Config) Validate() error {
 	}
 	if c.FFmpeg.VerifyDecodeSeconds == 0 {
 		c.FFmpeg.VerifyDecodeSeconds = 2
+	}
+	if c.FFmpeg.CorruptProbeSeconds == 0 {
+		c.FFmpeg.CorruptProbeSeconds = 30
+	}
+	if c.FFmpeg.CorruptErrorThreshold == 0 {
+		c.FFmpeg.CorruptErrorThreshold = 5
+	}
+	if c.FFmpeg.OutputFPS == 0 {
+		c.FFmpeg.OutputFPS = 30
+	}
+	if c.FFmpeg.CorruptStrategy == "" {
+		c.FFmpeg.CorruptStrategy = "auto"
+	}
+	switch strings.ToLower(c.FFmpeg.CorruptStrategy) {
+	case "auto", "discard", "cfr":
+	default:
+		return fmt.Errorf("corrupt_strategy 必须是 auto/discard/cfr")
 	}
 	if c.FFmpeg.ProgressStallMinutes == 0 {
 		c.FFmpeg.ProgressStallMinutes = 10

@@ -500,6 +500,12 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		duration = 0
 	}
 
+	repairMode := w.selectCorruptStrategy(inputPath, workerID)
+	discardCorrupt := w.config.FFmpeg.DiscardCorrupt
+	if repairMode == "discard" || repairMode == "cfr" {
+		discardCorrupt = true
+	}
+
 	outputTempPath := outputPath + ".stm_tmp"
 	success := false
 	defer func() {
@@ -512,6 +518,12 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 	args := []string{
 		"-y",                  // 覆盖输出文件
 		"-progress", "pipe:1", // 输出进度到stdout
+	}
+	if discardCorrupt {
+		args = append(args, "-fflags", "+discardcorrupt")
+		args = append(args, "-err_detect", "ignore_err")
+	}
+	args = append(args,
 		"-i", inputPath, // 输入文件
 		"-c:v", w.config.FFmpeg.Codec, // 视频编码器
 		"-preset", w.config.FFmpeg.Preset, // 预设
@@ -519,9 +531,18 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		"-pix_fmt", "yuv420p", // 提高兼容性
 		"-c:a", w.config.FFmpeg.Audio, // 音频编码器
 		"-b:a", w.config.FFmpeg.AudioBitrate, // 音频比特率
+	)
+	if repairMode == "cfr" {
+		fps := w.config.FFmpeg.OutputFPS
+		if fps <= 0 {
+			fps = 30
+		}
+		args = append(args, "-fps_mode", "cfr", "-r", strconv.Itoa(fps))
+	}
+	args = append(args,
 		"-movflags", "+faststart", // 优化流式播放
 		outputTempPath, // 输出文件（临时）
-	}
+	)
 
 	maxDuration := computeFfmpegTimeout(duration, w.config)
 	ffCtx, cancel := context.WithTimeout(ctx, maxDuration)
@@ -610,11 +631,11 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 
 		decodeSeconds := w.config.FFmpeg.VerifyDecodeSeconds
 		if decodeSeconds > 0 {
-			if err := media.DecodeSegment(outputTempPath, probeTimeout, 0, decodeSeconds); err != nil {
+			if err := media.DecodeSegmentStrict(outputTempPath, probeTimeout, 0, decodeSeconds); err != nil {
 				return fmt.Errorf("输出文件验证失败: %w", err)
 			}
 			if w.config.FFmpeg.VerifyTailSeekSeconds > 0 {
-				if err := media.DecodeSegment(outputTempPath, probeTimeout, w.config.FFmpeg.VerifyTailSeekSeconds, decodeSeconds); err != nil {
+				if err := media.DecodeSegmentStrict(outputTempPath, probeTimeout, w.config.FFmpeg.VerifyTailSeekSeconds, decodeSeconds); err != nil {
 					return fmt.Errorf("输出文件验证失败: %w", err)
 				}
 			}
@@ -672,6 +693,51 @@ func computeFfmpegTimeout(duration float64, cfg *config.Config) time.Duration {
 		}
 	}
 	return timeout
+}
+
+func (w *Worker) selectCorruptStrategy(path string, workerID int) string {
+	strategy := strings.ToLower(strings.TrimSpace(w.config.FFmpeg.CorruptStrategy))
+	if strategy == "" {
+		strategy = "auto"
+	}
+
+	switch strategy {
+	case "discard", "cfr":
+		return strategy
+	case "auto":
+	default:
+		return "cfr"
+	}
+
+	probeSeconds := w.config.FFmpeg.CorruptProbeSeconds
+	if probeSeconds <= 0 {
+		log.Printf("[Worker-%d] 抽样检测关闭，使用补帧策略", workerID)
+		return "cfr"
+	}
+
+	probeTimeout := time.Duration(w.config.FFmpeg.ProbeTimeoutSeconds) * time.Second
+	if need := time.Duration(probeSeconds+5) * time.Second; need > probeTimeout {
+		probeTimeout = need
+	}
+
+	errCount, err := media.CountDecodeErrors(path, probeTimeout, probeSeconds)
+	if err != nil {
+		log.Printf("[Worker-%d] 抽样检测失败，降级为补帧: %v", workerID, err)
+		return "cfr"
+	}
+
+	threshold := w.config.FFmpeg.CorruptErrorThreshold
+	if threshold <= 0 {
+		threshold = 1
+	}
+
+	if errCount >= threshold {
+		log.Printf("[Worker-%d] 抽样错误=%d >= %d，使用补帧策略", workerID, errCount, threshold)
+		return "cfr"
+	}
+
+	log.Printf("[Worker-%d] 抽样错误=%d < %d，使用丢坏帧策略", workerID, errCount, threshold)
+	return "discard"
 }
 
 // parseProgress 解析FFmpeg进度输出 (优化：每5%或5秒更新一次)
