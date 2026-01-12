@@ -22,6 +22,8 @@ ffmpeg:
   audio: "aac"
   audio_bitrate: "128k"
   output_extension: ".mp4"  # 统一输出容器，提升兼容性
+  verify_decode_seconds: 2  # 输出校验解码时长（秒）
+  verify_tail_seek_seconds: 10  # 从末尾回退秒数，抽样校验尾部（0为关闭）
   extensions: [".mp4", ".mkv", ".avi", ".ts", ".mov", ".flv", ".wmv", ".m4v", ".webm"]
   strict_check: true  # 转码前严格检查文件完整性，跳过损坏文件
   probe_timeout_seconds: 30
