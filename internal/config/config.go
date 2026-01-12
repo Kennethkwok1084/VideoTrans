@@ -52,6 +52,7 @@ type FFmpegConfig struct {
 	CRF                   int      `yaml:"crf"`
 	Audio                 string   `yaml:"audio"`
 	AudioBitrate          string   `yaml:"audio_bitrate"`
+	OutputExtension       string   `yaml:"output_extension"`
 	Extensions            []string `yaml:"extensions"`
 	ExcludePatterns       []string `yaml:"exclude_patterns"`
 	StrictCheck           bool     `yaml:"strict_check"` // 是否启用严格文件检查（检测损坏文件）
@@ -331,4 +332,16 @@ func (c *Config) IsVideoFile(filename string) bool {
 		}
 	}
 	return false
+}
+
+// ApplyOutputExtension 将输出文件扩展名统一为配置值（为空则保持原样）。
+func (c *Config) ApplyOutputExtension(path string) string {
+	ext := strings.TrimSpace(c.FFmpeg.OutputExtension)
+	if ext == "" {
+		return path
+	}
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	return strings.TrimSuffix(path, filepath.Ext(path)) + ext
 }
