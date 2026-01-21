@@ -373,40 +373,40 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 				// 执行转码（使用独立的 context，不受 ctx.Done() 影响）
 				taskCtx := context.Background()
 				if err := w.transcode(taskCtx, task, workerID); err != nil {
-				// 详细的错误日志
-				errMsg := err.Error()
-				log.Printf("[Worker-%d] ❌ 转码失败 #%d: %s", workerID, task.ID, task.SourcePath)
+					// 详细的错误日志
+					errMsg := err.Error()
+					log.Printf("[Worker-%d] ❌ 转码失败 #%d: %s", workerID, task.ID, task.SourcePath)
 
-				category, transient := classifyError(errMsg)
-				if category != "" {
-					log.Printf("[Worker-%d] 🧭 失败原因: %s", workerID, category)
-				}
-
-				// 截取关键错误信息（避免日志过长）
-				if len(errMsg) > 1000 {
-					log.Printf("[Worker-%d] 📋 错误详情 (前500字符): %s", workerID, errMsg[:500])
-				} else {
-					log.Printf("[Worker-%d] 📋 错误详情: %s", workerID, errMsg)
-				}
-
-				nextRetry := task.RetryCount + 1
-				w.db.IncrementRetryCount(task.ID)
-
-				if transient && nextRetry < 3 {
-					logMsg := errMsg
+					category, transient := classifyError(errMsg)
 					if category != "" {
-						logMsg = fmt.Sprintf("自动重试: %s\n%s", category, errMsg)
+						log.Printf("[Worker-%d] 🧭 失败原因: %s", workerID, category)
 					}
-					w.db.UpdateTaskProgress(task.ID, 0)
-					w.db.UpdateTaskStatus(task.ID, database.StatusPending, logMsg)
-				} else {
-					// 更新状态为失败（存储完整错误信息到数据库）
-					w.db.UpdateTaskStatus(task.ID, database.StatusFailed, errMsg)
-				}
 
-				// 更新 Prometheus metrics
-				metrics.TranscodeFailed.Inc()
-			} else {
+					// 截取关键错误信息（避免日志过长）
+					if len(errMsg) > 1000 {
+						log.Printf("[Worker-%d] 📋 错误详情 (前500字符): %s", workerID, errMsg[:500])
+					} else {
+						log.Printf("[Worker-%d] 📋 错误详情: %s", workerID, errMsg)
+					}
+
+					nextRetry := task.RetryCount + 1
+					w.db.IncrementRetryCount(task.ID)
+
+					if transient && nextRetry < 3 {
+						logMsg := errMsg
+						if category != "" {
+							logMsg = fmt.Sprintf("自动重试: %s\n%s", category, errMsg)
+						}
+						w.db.UpdateTaskProgress(task.ID, 0)
+						w.db.UpdateTaskStatus(task.ID, database.StatusPending, logMsg)
+					} else {
+						// 更新状态为失败（存储完整错误信息到数据库）
+						w.db.UpdateTaskStatus(task.ID, database.StatusFailed, errMsg)
+					}
+
+					// 更新 Prometheus metrics
+					metrics.TranscodeFailed.Inc()
+				} else {
 					log.Printf("[Worker-%d] ✅ 转码成功 #%d: %s", workerID, task.ID, task.SourcePath)
 
 					// 更新输出文件大小 - 单次遍历获取输出路径
@@ -506,7 +506,12 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		discardCorrupt = true
 	}
 
-	outputTempPath := outputPath + ".stm_tmp"
+	// 临时文件名: 保持扩展名,在基础名后加 .stm_tmp
+	// 例如: /path/file.mp4 -> /path/file.stm_tmp.mp4
+	ext := filepath.Ext(outputPath)
+	base := strings.TrimSuffix(outputPath, ext)
+	outputTempPath := base + ".stm_tmp" + ext
+
 	success := false
 	defer func() {
 		if !success {
