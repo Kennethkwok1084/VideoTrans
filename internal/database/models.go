@@ -9,10 +9,11 @@ import (
 type TaskStatus string
 
 const (
-	StatusPending    TaskStatus = "pending"
-	StatusProcessing TaskStatus = "processing"
-	StatusCompleted  TaskStatus = "completed"
-	StatusFailed     TaskStatus = "failed"
+	StatusPending       TaskStatus = "pending"
+	StatusProcessing    TaskStatus = "processing"
+	StatusCompleted     TaskStatus = "completed"
+	StatusFailed        TaskStatus = "failed"
+	StatusIrrecoverable TaskStatus = "irrecoverable"
 )
 
 // Task 转码任务模型
@@ -25,6 +26,7 @@ type Task struct {
 	RetryCount  int            `db:"retry_count" json:"retry_count"`   // 重试次数
 	Progress    float64        `db:"progress" json:"progress"`         // 转码进度（0-100）
 	OutputSize  int64          `db:"output_size" json:"output_size"`   // 输出文件大小
+	RepairMode  string         `db:"repair_mode" json:"repair_mode"`   // 修复模式（cfr/discard）
 	CreatedAt   time.Time      `db:"created_at" json:"created_at"`     // 创建时间
 	CompletedAt *time.Time     `db:"completed_at" json:"completed_at"` // 完成时间
 	Log         sql.NullString `db:"log" json:"log"`                   // 日志信息（可为NULL）

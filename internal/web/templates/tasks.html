@@ -46,6 +46,9 @@
                     <button onclick="filterTasks('failed')" id="btnFailed" class="filter-btn">
                         失败
                     </button>
+                    <button onclick="filterTasks('irrecoverable')" id="btnIrrecoverable" class="filter-btn">
+                        不可恢复
+                    </button>
                     <button onclick="filterTasks('scan_error')" id="btnScanError" class="filter-btn">
                         扫描异常
                     </button>
@@ -140,7 +143,8 @@
                 'pending': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800">待处理</span>',
                 'processing': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">处理中</span>',
                 'completed': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">已完成</span>',
-                'failed': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800">失败</span>'
+                'failed': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800">失败</span>',
+                'irrecoverable': '<span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-200 text-gray-800">不可恢复</span>'
             };
             return badges[status] || status;
         }
@@ -296,6 +300,7 @@
                 'processing': 'btnProcessing',
                 'completed': 'btnCompleted',
                 'failed': 'btnFailed',
+                'irrecoverable': 'btnIrrecoverable',
                 'scan_error': 'btnScanError'
             };
             const btnId = btnMap[status] || 'btnAll';

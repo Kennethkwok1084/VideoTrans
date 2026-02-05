@@ -29,8 +29,10 @@ type Worker struct {
 	forceRun       bool // 强制运行标志
 	maxWorkers     int  // 动态最大Worker数（可在运行时调整）
 	taskQueue      chan *database.Task
+	queuedTaskIDs  map[int64]struct{}
 	workerCount    int
 	wg             sync.WaitGroup
+	poolMu         sync.Mutex
 	mu             sync.RWMutex // 保护 forceRun, maxWorkers 和 workerCount
 	workerCtx      context.Context
 	cancelWorkers  context.CancelFunc
@@ -41,11 +43,23 @@ type Worker struct {
 
 // New 创建Worker实例
 func New(cfg *config.Config, db *database.DB) *Worker {
+	maxWorkers := 1
+	queueSize := 10
+	if cfg != nil {
+		if cfg.System.MaxWorkers > 0 {
+			maxWorkers = cfg.System.MaxWorkers
+		}
+		if cfg.System.TaskQueueSize > 0 {
+			queueSize = cfg.System.TaskQueueSize
+		}
+	}
+
 	return &Worker{
 		config:         cfg,
 		db:             db,
-		maxWorkers:     cfg.System.MaxWorkers, // 从配置初始化
-		taskQueue:      make(chan *database.Task, cfg.System.TaskQueueSize),
+		maxWorkers:     maxWorkers, // 从配置初始化
+		taskQueue:      make(chan *database.Task, queueSize),
+		queuedTaskIDs:  make(map[int64]struct{}),
 		workerCount:    0,
 		workersStopped: true,
 	}
@@ -58,6 +72,9 @@ func (w *Worker) Run(ctx context.Context) {
 	// 保存主 context
 	w.mainCtx = ctx
 
+	// 启动时先按当前策略立即调整一次，避免首次需要等待ticker
+	w.adjustWorkerPool(ctx, w.getTargetWorkerCount())
+
 	// 启动任务调度器
 	go w.scheduler(ctx)
 
@@ -67,21 +84,41 @@ func (w *Worker) Run(ctx context.Context) {
 	<-ctx.Done()
 	log.Println("[Worker] 收到停止信号，等待Worker完成...")
 
-	// 关闭任务队列
-	close(w.taskQueue)
+	// 停止接收和执行任务
+	w.mu.Lock()
+	w.workersStopped = true
+	w.queuedTaskIDs = make(map[int64]struct{})
+	w.workerCount = 0
+	cancelWorkers := w.cancelWorkers
+	w.cancelWorkers = nil
+	w.workerCtx = nil
+	w.mu.Unlock()
+
+	if cancelWorkers != nil {
+		cancelWorkers()
+	}
 
 	// 等待所有Worker完成
 	w.wg.Wait()
+	metrics.WorkersActive.Set(0)
 	log.Println("[Worker] Worker守护进程已退出")
 }
 
 // isWorkingHours 检查是否在工作时间窗口内
 func (w *Worker) IsWorkingHours() bool {
+	if w.config == nil {
+		return false
+	}
+
 	now := time.Now()
 	hour := now.Hour()
 
 	start := w.config.System.CronStart
 	end := w.config.System.CronEnd
+
+	if start == end {
+		return true
+	}
 
 	// 处理跨天情况（如 22:00 - 06:00）
 	if start < end {
@@ -106,31 +143,19 @@ func (w *Worker) SetForceRun(force bool) {
 
 	if force {
 		log.Println("[Worker] 强制运行模式已启用")
-		// 立即触发 Worker Pool 调整
-		go func() {
-			targetWorkers := w.getTargetWorkerCount()
-			currentWorkers := w.GetWorkerCount()
-
-			if targetWorkers != currentWorkers {
-				log.Printf("[WorkerPool] 强制模式触发：调整Worker数量 %d -> %d", currentWorkers, targetWorkers)
-				// 使用主 context
-				if w.mainCtx != nil {
-					w.adjustWorkerPool(w.mainCtx, targetWorkers)
-				}
-			}
-		}()
 	} else {
 		log.Println("[Worker] 强制运行模式已关闭")
-		// 立即检查是否需要停止 Worker
+	}
+
+	// 立即触发 Worker Pool 调整
+	if w.mainCtx != nil {
 		go func() {
 			targetWorkers := w.getTargetWorkerCount()
 			currentWorkers := w.GetWorkerCount()
 
 			if targetWorkers != currentWorkers {
-				log.Printf("[WorkerPool] 取消强制模式：调整Worker数量 %d -> %d", currentWorkers, targetWorkers)
-				if w.mainCtx != nil {
-					w.adjustWorkerPool(w.mainCtx, targetWorkers)
-				}
+				log.Printf("[WorkerPool] 强制模式变更：调整Worker数量 %d -> %d", currentWorkers, targetWorkers)
+				w.adjustWorkerPool(w.mainCtx, targetWorkers)
 			}
 		}()
 	}
@@ -157,7 +182,6 @@ func (w *Worker) getActiveTasks() int64 {
 // SetMaxWorkers 设置最大Worker数量（运行时动态调整）
 func (w *Worker) SetMaxWorkers(count int) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	if count < 1 {
 		count = 1
@@ -167,12 +191,42 @@ func (w *Worker) SetMaxWorkers(count int) {
 	}
 
 	w.maxWorkers = count
+	mainCtx := w.mainCtx
+	w.mu.Unlock()
+
 	log.Printf("[Worker] 最大Worker数量已调整为: %d", count)
+
+	if mainCtx != nil {
+		go w.adjustWorkerPool(mainCtx, w.getTargetWorkerCount())
+	}
+}
+
+func (w *Worker) markTaskEnqueued(taskID int64) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.workersStopped {
+		return false
+	}
+	if _, exists := w.queuedTaskIDs[taskID]; exists {
+		return false
+	}
+	w.queuedTaskIDs[taskID] = struct{}{}
+	return true
+}
+
+func (w *Worker) unmarkTaskEnqueued(taskID int64) {
+	w.mu.Lock()
+	delete(w.queuedTaskIDs, taskID)
+	w.mu.Unlock()
 }
 
 // scheduler 任务调度器，定期从数据库获取任务
 func (w *Worker) scheduler(ctx context.Context) {
-	interval := time.Duration(w.config.System.SchedulerInterval) * time.Second
+	interval := 10 * time.Second
+	if w.config != nil && w.config.System.SchedulerInterval > 0 {
+		interval = time.Duration(w.config.System.SchedulerInterval) * time.Second
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -196,6 +250,10 @@ func (w *Worker) scheduler(ctx context.Context) {
 				continue // 优雅关闭中，不再添加新任务
 			}
 
+			if w.db == nil {
+				continue
+			}
+
 			// 检查队列容量
 			if len(w.taskQueue) >= cap(w.taskQueue) {
 				continue // 队列已满，跳过本次调度
@@ -217,12 +275,18 @@ func (w *Worker) scheduler(ctx context.Context) {
 
 			// 将任务加入队列
 			for _, task := range tasks {
+				if !w.markTaskEnqueued(task.ID) {
+					continue
+				}
+
 				select {
 				case w.taskQueue <- task:
 					log.Printf("[Scheduler] 任务 #%d 已加入队列: %s", task.ID, task.SourcePath)
 				case <-ctx.Done():
+					w.unmarkTaskEnqueued(task.ID)
 					return
 				default:
+					w.unmarkTaskEnqueued(task.ID)
 					log.Printf("[Scheduler] 队列已满，跳过任务 #%d", task.ID)
 				}
 			}
@@ -232,7 +296,7 @@ func (w *Worker) scheduler(ctx context.Context) {
 
 // manageWorkerPool 动态管理Worker Pool大小
 func (w *Worker) manageWorkerPool(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -271,8 +335,14 @@ func (w *Worker) getTargetWorkerCount() int {
 
 // adjustWorkerPool 调整Worker Pool大小
 func (w *Worker) adjustWorkerPool(ctx context.Context, targetCount int) {
+	w.poolMu.Lock()
+	defer w.poolMu.Unlock()
+
+	if targetCount < 0 {
+		targetCount = 0
+	}
+
 	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	currentCount := w.workerCount
 
@@ -288,10 +358,12 @@ func (w *Worker) adjustWorkerPool(ctx context.Context, targetCount int) {
 			w.wg.Add(1)
 			go w.processWorker(w.workerCtx, i+1)
 		}
+		w.mu.Unlock()
 		log.Printf("[WorkerPool] 已启动 %d 个Worker", targetCount)
 
 		// 更新 Prometheus metrics
 		metrics.WorkersActive.Set(float64(targetCount))
+		return
 
 	} else if currentCount > 0 && targetCount == 0 {
 		// 优雅停止所有Worker：不再接受新任务，等待当前任务完成
@@ -303,39 +375,85 @@ func (w *Worker) adjustWorkerPool(ctx context.Context, targetCount int) {
 		activeTasks := w.getActiveTasks()
 		queuedTasks := len(w.taskQueue)
 		if activeTasks > 0 || queuedTasks > 0 {
+			w.mu.Unlock()
 			log.Printf("[WorkerPool] 非工作时间，等待任务完成后停止 (active=%d, queued=%d)", activeTasks, queuedTasks)
 			return
 		}
 
-		// 关闭任务队列，通知workers不再有新任务
-		// 但不取消context，让正在执行的任务继续完成
-		close(w.taskQueue)
-
-		// 释放锁，等待所有Worker完成当前任务
+		cancelWorkers := w.cancelWorkers
+		w.cancelWorkers = nil
+		w.workerCtx = nil
+		w.workerCount = 0
+		w.queuedTaskIDs = make(map[int64]struct{})
 		w.mu.Unlock()
-		log.Println("[WorkerPool] 等待所有正在处理的任务完成...")
-		w.wg.Wait()
-		log.Println("[WorkerPool] 所有任务已完成")
-		w.mu.Lock()
 
-		// 现在可以安全地清理资源
-		if w.cancelWorkers != nil {
-			w.cancelWorkers()
+		if cancelWorkers != nil {
+			cancelWorkers()
 		}
 
-		// 重新创建任务队列供下次启动使用
-		w.taskQueue = make(chan *database.Task, w.config.System.TaskQueueSize)
-
-		w.workerCount = 0
+		log.Println("[WorkerPool] 等待所有正在处理的任务完成...")
+		w.wg.Wait()
 		log.Println("[WorkerPool] 所有Worker已优雅停止")
 
 		// 更新 Prometheus metrics
 		metrics.WorkersActive.Set(0)
+		return
 
 	} else if currentCount > 0 && targetCount > 0 && currentCount != targetCount {
-		// 动态调整Worker数量（暂不支持，需重启）
-		log.Printf("[WorkerPool] Worker数量调整 %d->%d 需重启Pool", currentCount, targetCount)
+		if targetCount > currentCount {
+			// 扩容：直接新增 Worker
+			startIndex := currentCount + 1
+			for i := currentCount; i < targetCount; i++ {
+				w.wg.Add(1)
+				go w.processWorker(w.workerCtx, i+1)
+			}
+			w.workerCount = targetCount
+			w.workersStopped = false
+			w.mu.Unlock()
+			log.Printf("[WorkerPool] Worker扩容: %d -> %d", startIndex-1, targetCount)
+			metrics.WorkersActive.Set(float64(targetCount))
+			return
+		}
+
+		// 缩容：等待任务清空后重建Pool
+		activeTasks := w.getActiveTasks()
+		queuedTasks := len(w.taskQueue)
+		if activeTasks > 0 || queuedTasks > 0 {
+			w.mu.Unlock()
+			log.Printf("[WorkerPool] 缩容等待任务完成 (active=%d, queued=%d)", activeTasks, queuedTasks)
+			return
+		}
+
+		cancelWorkers := w.cancelWorkers
+		w.cancelWorkers = nil
+		w.workerCtx = nil
+		w.workerCount = 0
+		w.workersStopped = true
+		w.queuedTaskIDs = make(map[int64]struct{})
+		w.mu.Unlock()
+
+		if cancelWorkers != nil {
+			cancelWorkers()
+		}
+		w.wg.Wait()
+
+		// 重新按目标数量启动
+		w.mu.Lock()
+		w.workerCtx, w.cancelWorkers = context.WithCancel(ctx)
+		for i := 0; i < targetCount; i++ {
+			w.wg.Add(1)
+			go w.processWorker(w.workerCtx, i+1)
+		}
+		w.workerCount = targetCount
+		w.workersStopped = false
+		w.mu.Unlock()
+
+		log.Printf("[WorkerPool] Worker缩容重建完成: %d -> %d", currentCount, targetCount)
+		metrics.WorkersActive.Set(float64(targetCount))
+		return
 	}
+
+	w.mu.Unlock()
 }
 
 // processWorker Worker goroutine，从队列中获取任务并处理
@@ -354,6 +472,7 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 				log.Printf("[Worker-%d] 任务队列已关闭，退出", workerID)
 				return
 			}
+			w.unmarkTaskEnqueued(task.ID)
 
 			log.Printf("[Worker-%d] 开始处理任务 #%d: %s", workerID, task.ID, task.SourcePath)
 
@@ -377,7 +496,7 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 					errMsg := err.Error()
 					log.Printf("[Worker-%d] ❌ 转码失败 #%d: %s", workerID, task.ID, task.SourcePath)
 
-					category, transient := classifyError(errMsg)
+					category, transient, corrupt := classifyError(errMsg)
 					if category != "" {
 						log.Printf("[Worker-%d] 🧭 失败原因: %s", workerID, category)
 					}
@@ -392,7 +511,18 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 					nextRetry := task.RetryCount + 1
 					w.db.IncrementRetryCount(task.ID)
 
-					if transient && nextRetry < 3 {
+					if corrupt {
+						nextMode := getNextRepairMode(task.RepairMode)
+						if nextMode != "" {
+							msg := fmt.Sprintf("检测到损坏，尝试%s修复", repairModeLabel(nextMode))
+							_ = w.db.UpdateTaskRepairMode(task.ID, nextMode)
+							_ = w.db.UpdateTaskProgress(task.ID, 0)
+							_ = w.db.UpdateTaskStatus(task.ID, database.StatusPending, msg)
+						} else {
+							_ = w.db.UpdateTaskRepairMode(task.ID, "")
+							_ = w.db.UpdateTaskStatus(task.ID, database.StatusIrrecoverable, "文件损坏不可恢复")
+						}
+					} else if transient && nextRetry < 3 {
 						logMsg := errMsg
 						if category != "" {
 							logMsg = fmt.Sprintf("自动重试: %s\n%s", category, errMsg)
@@ -487,10 +617,15 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		return fmt.Errorf("磁盘空间检查失败: %w", err)
 	}
 
-	// 使用ffprobe检查文件完整性
+	repairMode := w.selectCorruptStrategy(task, inputPath, workerID)
+	attemptingRepair := task != nil && strings.TrimSpace(task.RepairMode) != ""
+
+	// 使用ffprobe检查文件完整性（修复模式下放宽）
 	probeTimeout := time.Duration(w.config.FFmpeg.ProbeTimeoutSeconds) * time.Second
-	if err := media.ProbeFile(inputPath, probeTimeout, 2); err != nil {
-		return fmt.Errorf("文件检查失败: %w", err)
+	if !attemptingRepair {
+		if err := media.ProbeFile(inputPath, probeTimeout, 2); err != nil {
+			return fmt.Errorf("文件检查失败: %w", err)
+		}
 	}
 
 	// 获取视频总时长
@@ -499,11 +634,12 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		log.Printf("[Worker-%d] 获取视频时长失败: %v", workerID, err)
 		duration = 0
 	}
-
-	repairMode := w.selectCorruptStrategy(inputPath, workerID)
 	discardCorrupt := w.config.FFmpeg.DiscardCorrupt
-	if repairMode == "discard" || repairMode == "cfr" {
+	if repairMode == "discard" {
 		discardCorrupt = true
+	}
+	if repairMode == "cfr" {
+		discardCorrupt = false
 	}
 
 	// 临时文件名: 保持扩展名,在基础名后加 .stm_tmp
@@ -700,7 +836,13 @@ func computeFfmpegTimeout(duration float64, cfg *config.Config) time.Duration {
 	return timeout
 }
 
-func (w *Worker) selectCorruptStrategy(path string, workerID int) string {
+func (w *Worker) selectCorruptStrategy(task *database.Task, path string, workerID int) string {
+	if task != nil {
+		if mode := strings.ToLower(strings.TrimSpace(task.RepairMode)); mode != "" {
+			return mode
+		}
+	}
+
 	strategy := strings.ToLower(strings.TrimSpace(w.config.FFmpeg.CorruptStrategy))
 	if strategy == "" {
 		strategy = "auto"
@@ -710,39 +852,33 @@ func (w *Worker) selectCorruptStrategy(path string, workerID int) string {
 	case "discard", "cfr":
 		return strategy
 	case "auto":
+		// 优先补帧策略
+		return "cfr"
 	default:
 		return "cfr"
 	}
+}
 
-	probeSeconds := w.config.FFmpeg.CorruptProbeSeconds
-	if probeSeconds <= 0 {
-		log.Printf("[Worker-%d] 抽样检测关闭，使用补帧策略", workerID)
+func getNextRepairMode(current string) string {
+	switch strings.ToLower(strings.TrimSpace(current)) {
+	case "":
 		return "cfr"
+	case "cfr":
+		return "discard"
+	default:
+		return ""
 	}
+}
 
-	probeTimeout := time.Duration(w.config.FFmpeg.ProbeTimeoutSeconds) * time.Second
-	if need := time.Duration(probeSeconds+5) * time.Second; need > probeTimeout {
-		probeTimeout = need
+func repairModeLabel(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "cfr":
+		return "补帧"
+	case "discard":
+		return "丢帧"
+	default:
+		return "修复"
 	}
-
-	errCount, err := media.CountDecodeErrors(path, probeTimeout, probeSeconds)
-	if err != nil {
-		log.Printf("[Worker-%d] 抽样检测失败，降级为补帧: %v", workerID, err)
-		return "cfr"
-	}
-
-	threshold := w.config.FFmpeg.CorruptErrorThreshold
-	if threshold <= 0 {
-		threshold = 1
-	}
-
-	if errCount >= threshold {
-		log.Printf("[Worker-%d] 抽样错误=%d >= %d，使用补帧策略", workerID, errCount, threshold)
-		return "cfr"
-	}
-
-	log.Printf("[Worker-%d] 抽样错误=%d < %d，使用丢坏帧策略", workerID, errCount, threshold)
-	return "discard"
 }
 
 // parseProgress 解析FFmpeg进度输出 (优化：每5%或5秒更新一次)
@@ -795,14 +931,14 @@ func (w *Worker) parseProgress(reader *bufio.Reader, taskID int64, totalDuration
 	}
 }
 
-func classifyError(errMsg string) (string, bool) {
+func classifyError(errMsg string) (string, bool, bool) {
 	lower := strings.ToLower(errMsg)
 
 	if strings.Contains(errMsg, "进度超过") || strings.Contains(errMsg, "FFmpeg超时") || strings.Contains(errMsg, "ffprobe超时") {
-		return "疑似IO卡住或进程超时", true
+		return "疑似IO卡住或进程超时", true, false
 	}
 	if strings.Contains(errMsg, "输出文件验证失败") {
-		return "输出文件损坏，自动重试", true
+		return "输出文件损坏", true, true
 	}
 	if strings.Contains(lower, "input/output error") ||
 		strings.Contains(lower, "i/o error") ||
@@ -813,10 +949,10 @@ func classifyError(errMsg string) (string, bool) {
 		strings.Contains(lower, "permission denied") ||
 		strings.Contains(lower, "no such file") ||
 		strings.Contains(lower, "broken pipe") {
-		return "疑似IO/挂载盘问题", true
+		return "疑似IO/挂载盘问题", true, false
 	}
 	if strings.Contains(errMsg, "磁盘空间") {
-		return "磁盘空间不足", false
+		return "磁盘空间不足", false, false
 	}
 	if strings.Contains(errMsg, "文件检查失败") ||
 		strings.Contains(errMsg, "文件损坏") ||
@@ -825,10 +961,10 @@ func classifyError(errMsg string) (string, bool) {
 		strings.Contains(errMsg, "Error splitting") ||
 		strings.Contains(errMsg, "Invalid data found") ||
 		strings.Contains(errMsg, "moov atom not found") {
-		return "文件损坏或格式不支持", false
+		return "文件损坏或格式不支持", false, true
 	}
 
-	return "未知原因", false
+	return "未知原因", false, false
 }
 
 type mountInfo struct {

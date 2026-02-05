@@ -1,4 +1,24 @@
-# Phase 2 代码审核报告
+文件检查失败: 文件解码测试失败 (文件损坏或格式不支持): [h264 @ 0x7c20f7f7b880] Invalid NAL unit size (0 > 22496). [h264 @ 0x7c20f7f7b880] missin...
+
+重试
+/mnt/5252/target/1.mp4
+
+文件检查失败: 视频流检查失败 (文件可能损坏): exit status 1, output: [mov,mp4,m4a,3gp,3g2,mj2 @ 0x7ea4270640c0] moov atom not found /mnt/525...
+
+重试
+/mnt/5252/target/11.mp4
+
+文件检查失败: 视频流检查失败 (文件可能损坏): exit status 1, output: [mov,mp4,m4a,3gp,3g2,mj2 @ 0x7b60b4dc40c0] moov atom not found /mnt/525...
+
+重试
+/mnt/5252/target/1742574513160.mp4
+
+FFmpeg进度超过10m0s未更新，疑似IO卡住: signal: killed 日志: ffmpeg version 6.1 Copyright (c) 2000-2023 the FFmpeg developers built w...
+
+重试
+/mnt/5252/target/1743782109087.mp4
+
+FFmpeg执行失败: exit status 254 日志: ffmpeg version 6.1 Copyright (c) 2000-2023 the FFmpeg developers built with gcc 13.2.1...# Phase 2 代码审核报告
 
 ## 📋 审核概况
 

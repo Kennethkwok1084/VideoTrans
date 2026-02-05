@@ -59,6 +59,7 @@ func (db *DB) createTables() error {
 		retry_count INTEGER NOT NULL DEFAULT 0,
 		progress REAL NOT NULL DEFAULT 0,
 		output_size INTEGER DEFAULT 0,
+		repair_mode TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		completed_at DATETIME,
 		log TEXT
@@ -69,8 +70,44 @@ func (db *DB) createTables() error {
 	CREATE INDEX IF NOT EXISTS idx_completed_at ON tasks(completed_at);
 	`
 
-	_, err := db.conn.Exec(schema)
-	return err
+	if _, err := db.conn.Exec(schema); err != nil {
+		return err
+	}
+	return db.ensureColumns()
+}
+
+func (db *DB) ensureColumns() error {
+	columns := map[string]struct{}{}
+	rows, err := db.conn.Query(`PRAGMA table_info(tasks)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var (
+		cid       int
+		name      string
+		colType   string
+		notNull   int
+		dfltValue interface{}
+		pk        int
+	)
+	for rows.Next() {
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		columns[name] = struct{}{}
+	}
+	if rows.Err() != nil {
+		return rows.Err()
+	}
+
+	if _, ok := columns["repair_mode"]; !ok {
+		if _, err := db.conn.Exec(`ALTER TABLE tasks ADD COLUMN repair_mode TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Close 关闭数据库连接
@@ -81,8 +118,8 @@ func (db *DB) Close() error {
 // CreateTask 创建新任务
 func (db *DB) CreateTask(task *Task) error {
 	query := `
-		INSERT INTO tasks (source_path, source_mtime, source_size, status)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO tasks (source_path, source_mtime, source_size, status, repair_mode)
+		VALUES (?, ?, ?, ?, ?)
 	`
 
 	result, err := db.conn.Exec(query,
@@ -90,6 +127,7 @@ func (db *DB) CreateTask(task *Task) error {
 		task.SourceMtime,
 		task.SourceSize,
 		StatusPending,
+		"",
 	)
 
 	if err != nil {
@@ -108,7 +146,7 @@ func (db *DB) CreateTask(task *Task) error {
 func (db *DB) GetTaskByPath(path string) (*Task, error) {
 	query := `
 		SELECT id, source_path, source_mtime, source_size, status, retry_count,
-		       progress, output_size, created_at, completed_at, log
+		       progress, output_size, repair_mode, created_at, completed_at, log
 		FROM tasks
 		WHERE source_path = ?
 	`
@@ -123,6 +161,7 @@ func (db *DB) GetTaskByPath(path string) (*Task, error) {
 		&task.RetryCount,
 		&task.Progress,
 		&task.OutputSize,
+		&task.RepairMode,
 		&task.CreatedAt,
 		&task.CompletedAt,
 		&task.Log,
@@ -159,6 +198,13 @@ func (db *DB) UpdateTaskStatus(id int64, status TaskStatus, log string) error {
 	return tx.Commit()
 }
 
+// UpdateTaskRepairMode 更新任务修复模式
+func (db *DB) UpdateTaskRepairMode(id int64, mode string) error {
+	query := `UPDATE tasks SET repair_mode = ? WHERE id = ?`
+	_, err := db.conn.Exec(query, mode, id)
+	return err
+}
+
 // UpdateTaskProgress 更新任务进度
 func (db *DB) UpdateTaskProgress(id int64, progress float64) error {
 	query := `UPDATE tasks SET progress = ? WHERE id = ?`
@@ -184,7 +230,7 @@ func (db *DB) UpdateTaskPath(id int64, newPath string) error {
 func (db *DB) GetPendingTasks(limit int) ([]*Task, error) {
 	query := `
 		SELECT id, source_path, source_mtime, source_size, status, retry_count,
-		       progress, output_size, created_at, completed_at, log
+		       progress, output_size, repair_mode, created_at, completed_at, log
 		FROM tasks
 		WHERE status = ? AND retry_count < 3
 		ORDER BY created_at ASC
@@ -209,6 +255,7 @@ func (db *DB) GetPendingTasks(limit int) ([]*Task, error) {
 			&task.RetryCount,
 			&task.Progress,
 			&task.OutputSize,
+			&task.RepairMode,
 			&task.CreatedAt,
 			&task.CompletedAt,
 			&task.Log,
@@ -226,7 +273,7 @@ func (db *DB) GetPendingTasks(limit int) ([]*Task, error) {
 func (db *DB) GetCompletedOldTasks(cutoffTime time.Time) ([]*Task, error) {
 	query := `
 		SELECT id, source_path, source_mtime, source_size, status, retry_count,
-		       progress, output_size, created_at, completed_at, log
+		       progress, output_size, repair_mode, created_at, completed_at, log
 		FROM tasks
 		WHERE status = ? AND completed_at < ?
 	`
@@ -249,6 +296,7 @@ func (db *DB) GetCompletedOldTasks(cutoffTime time.Time) ([]*Task, error) {
 			&task.RetryCount,
 			&task.Progress,
 			&task.OutputSize,
+			&task.RepairMode,
 			&task.CreatedAt,
 			&task.CompletedAt,
 			&task.Log,
@@ -266,8 +314,8 @@ func (db *DB) GetCompletedOldTasks(cutoffTime time.Time) ([]*Task, error) {
 func (db *DB) ResetTaskToPending(path string, mtime time.Time, size int64) error {
 	query := `
 		UPDATE tasks 
-		SET status = ?, source_mtime = ?, source_size = ?, retry_count = 0, 
-		    progress = 0, completed_at = NULL, log = ''
+		SET status = ?, source_mtime = ?, source_size = ?, retry_count = 0,
+		    progress = 0, completed_at = NULL, log = '', repair_mode = ''
 		WHERE source_path = ?
 	`
 
@@ -354,7 +402,7 @@ func (db *DB) GetAllTasks(status string, limit, offset int) ([]*Task, error) {
 	if status != "" {
 		query = `
 			SELECT id, source_path, source_mtime, source_size, status, retry_count,
-			       progress, output_size, created_at, completed_at, log
+			       progress, output_size, repair_mode, created_at, completed_at, log
 			FROM tasks
 			WHERE status = ?
 			ORDER BY created_at DESC
@@ -364,7 +412,7 @@ func (db *DB) GetAllTasks(status string, limit, offset int) ([]*Task, error) {
 	} else {
 		query = `
 			SELECT id, source_path, source_mtime, source_size, status, retry_count,
-			       progress, output_size, created_at, completed_at, log
+			       progress, output_size, repair_mode, created_at, completed_at, log
 			FROM tasks
 			ORDER BY created_at DESC
 			LIMIT ? OFFSET ?
@@ -390,6 +438,7 @@ func (db *DB) GetAllTasks(status string, limit, offset int) ([]*Task, error) {
 			&task.RetryCount,
 			&task.Progress,
 			&task.OutputSize,
+			&task.RepairMode,
 			&task.CreatedAt,
 			&task.CompletedAt,
 			&task.Log,
@@ -407,7 +456,7 @@ func (db *DB) GetAllTasks(status string, limit, offset int) ([]*Task, error) {
 func (db *DB) GetScanErrorTasks(limit, offset int) ([]*Task, error) {
 	query := `
 		SELECT id, source_path, source_mtime, source_size, status, retry_count,
-		       progress, output_size, created_at, completed_at, log
+		       progress, output_size, repair_mode, created_at, completed_at, log
 		FROM tasks
 		WHERE status != ? AND COALESCE(log, '') LIKE ?
 		ORDER BY created_at DESC
@@ -432,6 +481,7 @@ func (db *DB) GetScanErrorTasks(limit, offset int) ([]*Task, error) {
 			&task.RetryCount,
 			&task.Progress,
 			&task.OutputSize,
+			&task.RepairMode,
 			&task.CreatedAt,
 			&task.CompletedAt,
 			&task.Log,

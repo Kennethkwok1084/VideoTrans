@@ -5,17 +5,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Config 全局配置结构
 type Config struct {
-	System   SystemConfig   `yaml:"system"`
-	Path     PathConfig     `yaml:"path"`
-	FFmpeg   FFmpegConfig   `yaml:"ffmpeg"`
-	Cleaning CleaningConfig `yaml:"cleaning"`
-	Log      LogConfig      `yaml:"log"`
+	mu         sync.RWMutex   `yaml:"-"`
+	ConfigPath string         `yaml:"-"`
+	System     SystemConfig   `yaml:"system"`
+	Path       PathConfig     `yaml:"path"`
+	FFmpeg     FFmpegConfig   `yaml:"ffmpeg"`
+	Cleaning   CleaningConfig `yaml:"cleaning"`
+	Log        LogConfig      `yaml:"log"`
 }
 
 // SystemConfig 系统配置
@@ -72,8 +75,9 @@ type FFmpegConfig struct {
 
 // CleaningConfig 清理配置
 type CleaningConfig struct {
-	SoftDeleteDays int `yaml:"soft_delete_days"` // 移入垃圾桶天数
-	HardDeleteDays int `yaml:"hard_delete_days"` // 彻底删除天数
+	SoftDeleteDays int    `yaml:"soft_delete_days"` // 移入垃圾桶天数
+	HardDeleteDays int    `yaml:"hard_delete_days"` // 彻底删除天数
+	Cron           string `yaml:"cron"`             // 清理任务 Cron 表达式
 }
 
 // LogConfig 日志配置
@@ -100,6 +104,7 @@ func Load(configPath string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
+	cfg.ConfigPath = configPath
 
 	// 验证配置
 	if err := cfg.Validate(); err != nil {
@@ -114,12 +119,21 @@ func Load(configPath string) (*Config, error) {
 
 // Validate 验证配置的合法性
 func (c *Config) Validate() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// 验证时间窗口
 	if c.System.CronStart < 0 || c.System.CronStart > 23 {
 		return fmt.Errorf("cron_start 必须在 0-23 之间")
 	}
 	if c.System.CronEnd < 0 || c.System.CronEnd > 23 {
 		return fmt.Errorf("cron_end 必须在 0-23 之间")
+	}
+
+	if c.System.CronStart == c.System.CronEnd {
+		// 0-0 表示全天运行
+		c.System.CronStart = 0
+		c.System.CronEnd = 0
 	}
 
 	// 验证并发数
@@ -161,6 +175,16 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// 兼容：如果只配置了Pairs，则填充Input/Output为首对
+	if len(c.Path.Pairs) > 0 {
+		if c.Path.Input == "" {
+			c.Path.Input = c.Path.Pairs[0].Input
+		}
+		if c.Path.Output == "" {
+			c.Path.Output = c.Path.Pairs[0].Output
+		}
+	}
+
 	// 验证转换后的Pairs
 	for i, pair := range c.Path.Pairs {
 		if pair.Input == "" {
@@ -180,6 +204,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Cleaning.HardDeleteDays < c.Cleaning.SoftDeleteDays {
 		return fmt.Errorf("hard_delete_days 必须大于等于 soft_delete_days")
+	}
+	if strings.TrimSpace(c.Cleaning.Cron) == "" {
+		c.Cleaning.Cron = "0 10 * * *" // 默认每天 10:00
 	}
 
 	// 设置 FFmpeg 默认值
@@ -271,23 +298,133 @@ func (c *Config) applyEnvOverrides() {
 	}
 }
 
+// Save 将当前配置持久化到文件。
+func (c *Config) Save() error {
+	c.mu.RLock()
+	configPath := c.ConfigPath
+	snapshot := Config{
+		System:   c.System,
+		FFmpeg:   c.FFmpeg,
+		Cleaning: c.Cleaning,
+		Log:      c.Log,
+		Path: PathConfig{
+			Input:    c.Path.Input,
+			Inputs:   append([]string(nil), c.Path.Inputs...),
+			Output:   c.Path.Output,
+			Pairs:    append([]InputOutputPair(nil), c.Path.Pairs...),
+			Trash:    c.Path.Trash,
+			Database: c.Path.Database,
+		},
+	}
+	c.mu.RUnlock()
+
+	if configPath == "" {
+		return fmt.Errorf("配置文件路径为空，无法保存")
+	}
+
+	data, err := yaml.Marshal(&snapshot)
+	if err != nil {
+		return fmt.Errorf("序列化配置失败: %w", err)
+	}
+
+	tmpPath := configPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("写入临时配置失败: %w", err)
+	}
+	if err := os.Rename(tmpPath, configPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("替换配置文件失败: %w", err)
+	}
+
+	return nil
+}
+
 // GetTrashPath 获取完整的垃圾桶路径
 func (c *Config) GetTrashPath() string {
-	return filepath.Join(c.Path.Input, c.Path.Trash)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	base := c.Path.Input
+	if base == "" && len(c.Path.Pairs) > 0 {
+		base = c.Path.Pairs[0].Input
+	}
+	if base == "" {
+		base = "."
+	}
+	return filepath.Join(base, c.Path.Trash)
+}
+
+// GetTrashRoots 获取所有输入目录的垃圾桶路径
+func (c *Config) GetTrashRoots() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	seen := make(map[string]struct{})
+	var roots []string
+
+	addRoot := func(input string) {
+		if input == "" {
+			return
+		}
+		root := filepath.Join(input, c.Path.Trash)
+		if _, ok := seen[root]; ok {
+			return
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+
+	if c.Path.Input != "" {
+		addRoot(c.Path.Input)
+	}
+	for _, pair := range c.Path.Pairs {
+		addRoot(pair.Input)
+	}
+
+	return roots
 }
 
 // GetInputDirs 获取所有输入目录
 func (c *Config) GetInputDirs() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	seen := make(map[string]struct{})
 	var dirs []string
+	if c.Path.Input != "" {
+		seen[c.Path.Input] = struct{}{}
+		dirs = append(dirs, c.Path.Input)
+	}
 	for _, pair := range c.Path.Pairs {
+		if _, ok := seen[pair.Input]; ok {
+			continue
+		}
+		seen[pair.Input] = struct{}{}
 		dirs = append(dirs, pair.Input)
 	}
 	return dirs
 }
 
+// GetPrimaryInputDir 获取首选输入目录。
+func (c *Config) GetPrimaryInputDir() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.Path.Input != "" {
+		return c.Path.Input
+	}
+	if len(c.Path.Pairs) > 0 {
+		return c.Path.Pairs[0].Input
+	}
+	return ""
+}
+
 // GetOutputDir 根据输入目录或文件路径获取对应的输出目录
 // 参数可以是目录路径或文件路径，会自动查找匹配的输入目录配对
 func (c *Config) GetOutputDir(path string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	// 遍历所有配对，检查路径是否在某个输入目录下
 	for _, pair := range c.Path.Pairs {
 		// 精确匹配目录
@@ -308,22 +445,35 @@ func (c *Config) GetOutputDir(path string) string {
 
 // GetPairs 获取所有输入输出配对
 func (c *Config) GetPairs() []InputOutputPair {
-	return c.Path.Pairs
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return append([]InputOutputPair(nil), c.Path.Pairs...)
 }
 
 // AddInputOutputPair 添加输入输出目录配对
 func (c *Config) AddInputOutputPair(inputDir, outputDir string) error {
+	inputDir = filepath.Clean(strings.TrimSpace(inputDir))
+	outputDir = filepath.Clean(strings.TrimSpace(outputDir))
+
 	// 检查输入输出目录不能相同
 	if inputDir == outputDir {
 		return fmt.Errorf("输入目录和输出目录不能相同: %s", inputDir)
 	}
 
+	if inputDir == "" || outputDir == "" {
+		return fmt.Errorf("输入输出目录不能为空")
+	}
+
 	// 检查输入目录是否已存在
+	c.mu.RLock()
 	for _, pair := range c.Path.Pairs {
 		if pair.Input == inputDir {
+			c.mu.RUnlock()
 			return fmt.Errorf("输入目录已存在")
 		}
 	}
+	c.mu.RUnlock()
 
 	// 检查目录是否存在
 	if _, err := os.Stat(inputDir); os.IsNotExist(err) {
@@ -333,15 +483,28 @@ func (c *Config) AddInputOutputPair(inputDir, outputDir string) error {
 		return fmt.Errorf("输出目录不存在: %s", outputDir)
 	}
 
+	c.mu.Lock()
+	for _, pair := range c.Path.Pairs {
+		if pair.Input == inputDir {
+			c.mu.Unlock()
+			return fmt.Errorf("输入目录已存在")
+		}
+	}
 	c.Path.Pairs = append(c.Path.Pairs, InputOutputPair{
 		Input:  inputDir,
 		Output: outputDir,
 	})
+	c.mu.Unlock()
 	return nil
 }
 
 // RemoveInputOutputPair 删除输入输出目录配对
 func (c *Config) RemoveInputOutputPair(inputDir string) error {
+	inputDir = filepath.Clean(strings.TrimSpace(inputDir))
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	newPairs := []InputOutputPair{}
 	found := false
 
@@ -367,9 +530,12 @@ func (c *Config) RemoveInputOutputPair(inputDir string) error {
 
 // IsVideoFile 检查文件是否为支持的视频格式
 func (c *Config) IsVideoFile(filename string) bool {
-	ext := filepath.Ext(filename)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	ext := strings.ToLower(filepath.Ext(filename))
 	for _, validExt := range c.FFmpeg.Extensions {
-		if ext == validExt {
+		if ext == strings.ToLower(validExt) {
 			return true
 		}
 	}
@@ -378,6 +544,9 @@ func (c *Config) IsVideoFile(filename string) bool {
 
 // ApplyOutputExtension 将输出文件扩展名统一为配置值（为空则保持原样）。
 func (c *Config) ApplyOutputExtension(path string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	ext := strings.TrimSpace(c.FFmpeg.OutputExtension)
 	if ext == "" {
 		return path

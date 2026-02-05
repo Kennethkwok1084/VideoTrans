@@ -293,12 +293,28 @@ func (s *Server) handleAddDirectory(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	var warning string
+	if err := s.config.Save(); err != nil {
+		warning = "目录已生效，但配置文件保存失败，重启容器后可能丢失: " + err.Error()
+		log.Printf("[API] 保存配置失败: %v", err)
+	}
+
+	go func() {
+		if err := s.scanner.Scan(context.Background()); err != nil {
+			log.Printf("[API] 新增目录后立即扫描失败: %v", err)
+		}
+	}()
+
+	resp := gin.H{
 		"message":    "目录配对已添加",
 		"input_dir":  req.InputDir,
 		"output_dir": req.OutputDir,
 		"pairs":      s.config.GetPairs(),
-	})
+	}
+	if warning != "" {
+		resp["warning"] = warning
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // handleRemoveDirectory 删除监控目录配对
@@ -317,22 +333,45 @@ func (s *Server) handleRemoveDirectory(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	var warning string
+	if err := s.config.Save(); err != nil {
+		warning = "目录已移除，但配置文件保存失败，重启容器后可能恢复: " + err.Error()
+		log.Printf("[API] 保存配置失败: %v", err)
+	}
+
+	resp := gin.H{
 		"message": "目录配对已删除",
 		"pairs":   s.config.GetPairs(),
-	})
+	}
+	if warning != "" {
+		resp["warning"] = warning
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // handleBrowseDirectory 浏览目录（用于选择监控目录）
 func (s *Server) handleBrowseDirectory(c *gin.Context) {
 	path := c.Query("path")
 	if path == "" {
-		path = "/mnt" // 默认从 /mnt 开始浏览
+		path = s.getDefaultBrowsePath()
 	}
 
-	// 安全检查：只允许浏览 /mnt 下的目录
-	if !strings.HasPrefix(path, "/mnt") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "只能浏览 /mnt 目录"})
+	path = filepath.Clean(path)
+	if path == "." {
+		path = "/"
+	}
+	if !filepath.IsAbs(path) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "路径必须是绝对路径"})
+		return
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "路径不可访问: " + err.Error()})
+		return
+	}
+	if !info.IsDir() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "路径不是目录"})
 		return
 	}
 
@@ -360,6 +399,11 @@ func (s *Server) handleBrowseDirectory(c *gin.Context) {
 		}
 
 		fullPath := filepath.Join(path, entry.Name())
+		if info, err := entry.Info(); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+		}
 		dirs = append(dirs, DirInfo{
 			Name:  entry.Name(),
 			Path:  fullPath,
@@ -452,6 +496,22 @@ func (s *Server) getWorkerMode() string {
 func (s *Server) Start(addr string) error {
 	log.Printf("[Web] 启动Web服务器: http://%s", addr)
 	return s.router.Run(addr)
+}
+
+func (s *Server) getDefaultBrowsePath() string {
+	for _, pair := range s.config.GetPairs() {
+		if info, err := os.Stat(pair.Input); err == nil && info.IsDir() {
+			return pair.Input
+		}
+	}
+
+	candidates := []string{"/mnt", "/input", "/media", "/"}
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return "/"
 }
 
 // handleIndex 首页（仪表盘）

@@ -81,8 +81,8 @@ func TestValidate(t *testing.T) {
 			name: "有效配置",
 			config: Config{
 				System: SystemConfig{
-					CronStart:    2,
-					CronEnd:      8,
+					CronStart:    0,
+					CronEnd:      0,
 					MaxWorkers:   3,
 					ScanInterval: 10,
 				},
@@ -207,7 +207,10 @@ func TestIsVideoFile(t *testing.T) {
 func TestGetTrashPath(t *testing.T) {
 	cfg := &Config{
 		Path: PathConfig{
-			Input: "/input",
+			Pairs: []InputOutputPair{{
+				Input:  "/input",
+				Output: "/output",
+			}},
 			Trash: ".stm_trash",
 		},
 	}
@@ -227,7 +230,7 @@ func TestEnvOverrides(t *testing.T) {
 
 	cfg := &Config{
 		System: SystemConfig{MaxWorkers: 3},
-		Path:   PathConfig{Input: "/default/input"},
+		Path:   PathConfig{Input: "/default/input", Pairs: []InputOutputPair{{Input: "/default/input", Output: "/default/output"}}},
 	}
 
 	cfg.applyEnvOverrides()
@@ -238,5 +241,9 @@ func TestEnvOverrides(t *testing.T) {
 
 	if cfg.Path.Input != "/custom/input" {
 		t.Errorf("环境变量覆盖失败: Input = %s, want /custom/input", cfg.Path.Input)
+	}
+
+	if cfg.Path.Pairs[0].Input != "/default/input" {
+		t.Errorf("Pairs 不应被环境变量覆盖: %s", cfg.Path.Pairs[0].Input)
 	}
 }

@@ -38,7 +38,11 @@ func (c *Cleaner) Run(ctx context.Context) {
 	cronScheduler := cron.New()
 
 	// 添加定时任务：每天上午 10:00 执行
-	_, err := cronScheduler.AddFunc("0 10 * * *", func() {
+	cronSpec := strings.TrimSpace(c.config.Cleaning.Cron)
+	if cronSpec == "" {
+		cronSpec = "0 10 * * *"
+	}
+	_, err := cronScheduler.AddFunc(cronSpec, func() {
 		c.runCleaning()
 	})
 
@@ -49,7 +53,7 @@ func (c *Cleaner) Run(ctx context.Context) {
 
 	// 启动调度器
 	cronScheduler.Start()
-	log.Println("[Cleaner] Cron 调度器已启动（每天 10:00 执行清理）")
+	log.Printf("[Cleaner] Cron 调度器已启动（%s）", cronSpec)
 
 	// 可选：立即执行一次清理
 	go c.runCleaning()
@@ -97,7 +101,10 @@ func (c *Cleaner) moveToTrash() error {
 	movedCount := 0
 
 	for _, task := range tasks {
-		srcPath := filepath.Join(c.config.Path.Input, task.SourcePath)
+		srcPath := c.resolveSourcePath(task.SourcePath)
+		if srcPath == "" {
+			continue
+		}
 
 		// 检查源文件是否存在
 		if _, err := os.Stat(srcPath); os.IsNotExist(err) {
@@ -207,61 +214,67 @@ func (c *Cleaner) copyAndDelete(src, dst string) error {
 
 // emptyTrash 清空超过N天的垃圾桶文件
 func (c *Cleaner) emptyTrash() error {
-	trashRoot := c.config.GetTrashPath()
-
-	// 检查垃圾桶目录是否存在
-	if _, err := os.Stat(trashRoot); os.IsNotExist(err) {
-		return nil
-	}
+	trashRoots := c.getTrashRoots()
 
 	cutoffTime := time.Now().AddDate(0, 0, -c.config.Cleaning.HardDeleteDays)
 	deletedCount := 0
 
-	err := filepath.WalkDir(trashRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	for _, trashRoot := range trashRoots {
+		// 检查垃圾桶目录是否存在
+		if _, err := os.Stat(trashRoot); os.IsNotExist(err) {
+			continue
 		}
 
-		// 跳过目录
-		if d.IsDir() {
-			return nil
-		}
-
-		// 解析文件名时间戳 "video.mp4_del_20260105_120000"
-		filename := d.Name()
-		parts := strings.Split(filename, "_del_")
-		var fileTime time.Time
-
-		if len(parts) >= 2 {
-			// 尝试解析时间戳
-			timestamp := parts[len(parts)-1]
-			fileTime, err = time.Parse("20060102_150405", timestamp)
+		err := filepath.WalkDir(trashRoot, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
-				// 降级到使用文件修改时间
+				return nil
+			}
+
+			// 跳过目录
+			if d.IsDir() {
+				return nil
+			}
+
+			// 解析文件名时间戳 "video.mp4_del_20260105_120000"
+			filename := d.Name()
+			parts := strings.Split(filename, "_del_")
+			var fileTime time.Time
+
+			if len(parts) >= 2 {
+				// 尝试解析时间戳
+				timestamp := parts[len(parts)-1]
+				fileTime, err = time.Parse("20060102_150405", timestamp)
+				if err != nil {
+					// 降级到使用文件修改时间
+					info, _ := d.Info()
+					fileTime = info.ModTime()
+				}
+			} else {
+				// 无时间戳，使用文件修改时间
 				info, _ := d.Info()
 				fileTime = info.ModTime()
 			}
-		} else {
-			// 无时间戳，使用文件修改时间
-			info, _ := d.Info()
-			fileTime = info.ModTime()
-		}
 
-		// 检查是否超过清理时间
-		if fileTime.Before(cutoffTime) {
-			if err := os.Remove(path); err != nil {
-				log.Printf("[Cleaner] 删除文件失败 %s: %v", path, err)
-				return nil
+			// 检查是否超过清理时间
+			if fileTime.Before(cutoffTime) {
+				if err := os.Remove(path); err != nil {
+					log.Printf("[Cleaner] 删除文件失败 %s: %v", path, err)
+					return nil
+				}
+				deletedCount++
+				log.Printf("[Cleaner] 彻底删除过期文件: %s", filename)
+
+				// 更新 Prometheus metrics
+				metrics.FilesHardDeleted.Inc()
 			}
-			deletedCount++
-			log.Printf("[Cleaner] 彻底删除过期文件: %s", filename)
 
-			// 更新 Prometheus metrics
-			metrics.FilesHardDeleted.Inc()
+			return nil
+		})
+
+		if err != nil {
+			return err
 		}
-
-		return nil
-	})
+	}
 
 	if deletedCount > 0 {
 		log.Printf("[Cleaner] 共彻底删除 %d 个过期文件", deletedCount)
@@ -269,64 +282,70 @@ func (c *Cleaner) emptyTrash() error {
 		log.Println("[Cleaner] 垃圾桶中没有过期文件")
 	}
 
-	return err
+	return nil
 }
 
 // ListTrashFiles 列出垃圾桶中的文件
 func (c *Cleaner) ListTrashFiles() ([]TrashFile, error) {
-	trashRoot := c.config.GetTrashPath()
-
-	// 检查垃圾桶目录是否存在
-	if _, err := os.Stat(trashRoot); os.IsNotExist(err) {
-		return []TrashFile{}, nil
-	}
+	trashRoots := c.getTrashRoots()
 
 	var files []TrashFile
 
-	err := filepath.WalkDir(trashRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+	for _, trashRoot := range trashRoots {
+		// 检查垃圾桶目录是否存在
+		if _, err := os.Stat(trashRoot); os.IsNotExist(err) {
+			continue
 		}
 
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
+		err := filepath.WalkDir(trashRoot, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
 
-		// 解析删除时间
-		filename := d.Name()
-		parts := strings.Split(filename, "_del_")
-		var deleteTime time.Time
-
-		if len(parts) >= 2 {
-			timestamp := parts[len(parts)-1]
-			deleteTime, err = time.Parse("20060102_150405", timestamp)
+			info, err := d.Info()
 			if err != nil {
+				return nil
+			}
+
+			// 解析删除时间
+			filename := d.Name()
+			parts := strings.Split(filename, "_del_")
+			var deleteTime time.Time
+
+			if len(parts) >= 2 {
+				timestamp := parts[len(parts)-1]
+				deleteTime, err = time.Parse("20060102_150405", timestamp)
+				if err != nil {
+					deleteTime = info.ModTime()
+				}
+			} else {
 				deleteTime = info.ModTime()
 			}
-		} else {
-			deleteTime = info.ModTime()
-		}
 
-		// 计算剩余天数
-		hardDeleteTime := deleteTime.AddDate(0, 0, c.config.Cleaning.HardDeleteDays)
-		daysLeft := int(time.Until(hardDeleteTime).Hours() / 24)
-		if daysLeft < 0 {
-			daysLeft = 0
-		}
+			// 计算剩余天数
+			hardDeleteTime := deleteTime.AddDate(0, 0, c.config.Cleaning.HardDeleteDays)
+			daysLeft := int(time.Until(hardDeleteTime).Hours() / 24)
+			if daysLeft < 0 {
+				daysLeft = 0
+			}
 
-		files = append(files, TrashFile{
-			Name:       filename,
-			Path:       path,
-			Size:       info.Size(),
-			DeleteTime: deleteTime,
-			DaysLeft:   daysLeft,
+			files = append(files, TrashFile{
+				Name:       filename,
+				Path:       path,
+				Size:       info.Size(),
+				DeleteTime: deleteTime,
+				DaysLeft:   daysLeft,
+			})
+
+			return nil
 		})
 
-		return nil
-	})
+		if err != nil {
+			return nil, err
+		}
+	}
 
-	return files, err
+	return files, nil
 }
 
 // TrashFile 垃圾桶文件信息
@@ -340,24 +359,72 @@ type TrashFile struct {
 
 // DeleteTrashFile 立即删除垃圾桶中的指定文件
 func (c *Cleaner) DeleteTrashFile(filename string) error {
-	trashRoot := c.config.GetTrashPath()
-	filePath := filepath.Join(trashRoot, filename)
-
-	// 验证路径安全性（防止路径穿越）
-	if !strings.HasPrefix(filePath, trashRoot) {
+	if strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
 		return fmt.Errorf("非法路径")
 	}
 
-	// 检查文件是否存在
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return fmt.Errorf("文件不存在")
+	for _, trashRoot := range c.getTrashRoots() {
+		filePath := filepath.Join(trashRoot, filename)
+		filePath = filepath.Clean(filePath)
+
+		// 验证路径安全性（防止路径穿越）
+		prefix := filepath.Clean(trashRoot) + string(filepath.Separator)
+		if !strings.HasPrefix(filePath, prefix) {
+			continue
+		}
+
+		// 检查文件是否存在
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			continue
+		}
+
+		// 删除文件
+		if err := os.Remove(filePath); err != nil {
+			return fmt.Errorf("删除文件失败: %w", err)
+		}
+
+		log.Printf("[Cleaner] 手动删除垃圾桶文件: %s", filePath)
+		return nil
 	}
 
-	// 删除文件
-	if err := os.Remove(filePath); err != nil {
-		return fmt.Errorf("删除文件失败: %w", err)
+	return fmt.Errorf("文件不存在")
+}
+
+func (c *Cleaner) getTrashRoots() []string {
+	roots := c.config.GetTrashRoots()
+	if len(roots) == 0 {
+		return []string{c.config.GetTrashPath()}
+	}
+	return roots
+}
+
+func (c *Cleaner) resolveSourcePath(taskPath string) string {
+	if taskPath == "" {
+		return ""
 	}
 
-	log.Printf("[Cleaner] 手动删除垃圾桶文件: %s", filename)
-	return nil
+	// 新版本记录直接存完整路径
+	if filepath.IsAbs(taskPath) {
+		return taskPath
+	}
+
+	// 兼容旧版本记录（相对路径）
+	var candidates []string
+	if input := c.config.GetPrimaryInputDir(); input != "" {
+		candidates = append(candidates, filepath.Join(input, taskPath))
+	}
+	for _, pair := range c.config.GetPairs() {
+		candidates = append(candidates, filepath.Join(pair.Input, taskPath))
+	}
+
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return taskPath
 }

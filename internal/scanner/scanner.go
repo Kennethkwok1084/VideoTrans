@@ -46,6 +46,10 @@ func (s *Scanner) Scan(ctx context.Context) error {
 
 	for _, pair := range pairs {
 		log.Printf("[Scanner] 扫描目录: %s -> %s", pair.Input, pair.Output)
+		if _, err := os.Stat(pair.Input); err != nil {
+			log.Printf("[Scanner] 输入目录不可访问 %s: %v", pair.Input, err)
+			continue
+		}
 		newCount, updateCount, skipCount, err := s.scanDirectory(ctx, pair.Input, pair.Output)
 		if err != nil {
 			log.Printf("[Scanner] 扫描目录失败 %s: %v", pair.Input, err)

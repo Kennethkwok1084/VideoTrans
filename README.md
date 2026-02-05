@@ -104,8 +104,8 @@ path:
 system:
   db_path: "/data/stm.db"    # 数据库路径
   max_workers: 3             # 并发转码数
-  cron_start: 22             # 工作开始时间（小时）
-  cron_end: 7                # 工作结束时间（小时）
+  cron_start: 0              # 工作开始时间（小时）
+  cron_end: 0                # 工作结束时间（小时，0-0 表示全天）
   scheduler_interval: 10     # 调度器检查间隔（秒）
   task_queue_size: 10        # 任务队列容量
   min_disk_space_gb: 5       # 最小磁盘空间要求（GB）
@@ -122,6 +122,7 @@ ffmpeg:
 cleaning:
   soft_delete_days: 7        # 移入垃圾桶天数
   hard_delete_days: 30       # 彻底删除天数
+  cron: "0 10 * * *"         # 清理任务时间（Cron 表达式）
 
 # Web 配置
 web:
@@ -170,6 +171,7 @@ GET /api/stats
 
 # 获取任务列表
 GET /api/tasks?status=pending&page=1&limit=20
+# status 可选: pending/processing/completed/failed/irrecoverable
 
 # 手动触发扫描
 POST /api/scan

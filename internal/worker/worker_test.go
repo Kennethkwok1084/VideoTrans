@@ -15,6 +15,13 @@ func TestIsWorkingHours(t *testing.T) {
 		want        bool
 	}{
 		{
+			name:        "全天运行 - start=end",
+			workStart:   0,
+			workEnd:     0,
+			currentHour: 12,
+			want:        true,
+		},
+		{
 			name:        "正常工作时间段 - 在时间窗口内",
 			workStart:   0,
 			workEnd:     6,
@@ -73,7 +80,9 @@ func TestIsWorkingHours(t *testing.T) {
 			hour := tt.currentHour
 
 			var got bool
-			if start < end {
+			if start == end {
+				got = true
+			} else if start < end {
 				got = hour >= start && hour < end
 			} else {
 				got = hour >= start || hour < end

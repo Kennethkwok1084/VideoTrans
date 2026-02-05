@@ -71,12 +71,12 @@ func TestSafeMoveToTrash(t *testing.T) {
 func TestMoveToTrashIntegration(t *testing.T) {
 	// 创建临时测试目录
 	tempDir := t.TempDir()
-	trashRoot := filepath.Join(tempDir, "trash")
+	trashName := ".stm_trash"
 
 	cfg := &config.Config{
 		Path: config.PathConfig{
 			Input: tempDir,
-			Trash: trashRoot,
+			Trash: trashName,
 		},
 		Cleaning: config.CleaningConfig{
 			SoftDeleteDays: 1,
@@ -111,11 +111,12 @@ func TestMoveToTrashIntegration(t *testing.T) {
 	}
 
 	// 验证文件在回收站
-	stage1Dir := filepath.Join(trashRoot, "stage1")
-	if _, err := os.Stat(stage1Dir); err == nil {
-		entries, err := os.ReadDir(stage1Dir)
-		if err == nil && len(entries) > 0 {
-			t.Logf("stage1 目录中有 %d 个文件", len(entries))
-		}
+	trashRoot := filepath.Join(tempDir, trashName)
+	entries, err := os.ReadDir(trashRoot)
+	if err != nil {
+		t.Fatalf("读取垃圾桶失败: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("垃圾桶中未找到文件")
 	}
 }

@@ -282,7 +282,7 @@
             `;
             document.body.appendChild(modal);
 
-            let currentPath = '/mnt';
+            let currentPath = '';
             let selectedInputPath = '';
             let selectedOutputPath = '';
 
@@ -385,8 +385,8 @@
 
             // 上级目录按钮
             document.getElementById('btnParentDir').addEventListener('click', () => {
-                if (currentPath !== '/mnt') {
-                    const parent = currentPath.split('/').slice(0, -1).join('/') || '/mnt';
+                if (currentPath && currentPath !== '/') {
+                    const parent = currentPath.split('/').slice(0, -1).join('/') || '/';
                     browsePath(parent);
                 }
             });
@@ -410,7 +410,8 @@
                     const data = await res.json();
 
                     if (res.ok) {
-                        alert(`目录配对已添加:\n输入: ${selectedInputPath}\n输出: ${selectedOutputPath}`);
+                        const warning = data.warning ? `\n\n注意: ${data.warning}` : '';
+                        alert(`目录配对已添加:\n输入: ${selectedInputPath}\n输出: ${selectedOutputPath}${warning}`);
                         modal.remove();
                         loadDirectories();
                     } else {
@@ -422,7 +423,7 @@
             });
 
             // 初始加载
-            browsePath('/mnt');
+            browsePath('');
         }
 
         // 删除监控目录配对
@@ -438,7 +439,8 @@
                 const data = await res.json();
 
                 if (res.ok) {
-                    alert('目录配对已删除');
+                    const warning = data.warning ? `\n注意: ${data.warning}` : '';
+                    alert(`目录配对已删除${warning}`);
                     loadDirectories();
                 } else {
                     alert('删除失败: ' + data.error);

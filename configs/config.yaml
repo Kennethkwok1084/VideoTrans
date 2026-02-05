@@ -1,6 +1,6 @@
 system:
-  cron_start: 2
-  cron_end: 8
+  cron_start: 0
+  cron_end: 0
   max_workers: 3  # Ryzen 3500X 建议设为 3
   scan_interval: 10  # 扫描间隔（分钟）
   scheduler_interval: 10  # 调度器检查间隔（秒）
@@ -48,6 +48,7 @@ ffmpeg:
 cleaning:
   soft_delete_days: 7   # 移入垃圾桶天数
   hard_delete_days: 30  # 彻底删除天数
+  cron: "0 10 * * *"    # 清理任务时间（Cron 表达式）
 
 log:
   level: "info"  # debug, info, warn, error
