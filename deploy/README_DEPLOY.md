@@ -34,10 +34,12 @@ vi /opt/stm/docker-compose.yml
 修改 `volumes` 部分（根据你的实际目录）：
 ```yaml
 volumes:
-  - /你的源视频目录:/input          # 例如: /mnt/media/downloads
-  - /你的输出目录:/output            # 例如: /mnt/media/archive
+  - /mnt:/mnt                        # 推荐：挂载整个 /mnt（与默认配置一致）
   - ./data:/data
   - ./configs/config.yaml:/app/config.yaml:ro
+
+ports:
+  - "9999:8080"
 ```
 
 ### 4. 配置转码参数
@@ -50,18 +52,20 @@ vi /opt/stm/configs/config.yaml
 关键配置项：
 ```yaml
 path:
-  input: "/input"                    # 容器内路径（不需要修改）
-  output: "/output"                  # 容器内路径（不需要修改）
+  pairs:
+    - input: "/mnt/pve/media/downloads"
+      output: "/mnt/pve/media/archive"
+  trash: ".stm_trash"
   database: "/data/tasks.db"         # 数据库路径
 
 ffmpeg:
-  video_codec: "libx265"             # 视频编码器
+  codec: "libx264"                   # 视频编码器
   crf: 28                            # 质量参数（18-28）
-  preset: "medium"                   # 速度预设
+  preset: "veryslow"                 # 速度预设
 
-worker:
+system:
   max_workers: 3                     # 最大并发数（根据CPU核心数调整）
-  scan_interval: 300                 # 扫描间隔（秒）
+  scan_interval: 10                  # 扫描间隔（分钟）
 ```
 
 ### 5. 构建并启动服务
@@ -83,12 +87,12 @@ docker compose logs -f
 
 访问Web界面：
 ```
-http://192.168.31.124:8080
+http://192.168.31.124:9999
 ```
 
 检查健康状态：
 ```bash
-curl http://localhost:8080/api/health
+curl http://localhost:9999/api/health
 # 预期输出: {"status":"ok"}
 ```
 
@@ -121,7 +125,7 @@ docker exec -it stm sh
 
 访问 Prometheus 指标端点：
 ```
-http://192.168.31.124:8080/metrics
+http://192.168.31.124:9999/metrics
 ```
 
 主要指标：
@@ -139,7 +143,7 @@ http://192.168.31.124:8080/metrics
 
 访问回收站管理：
 ```
-http://192.168.31.124:8080/trash
+http://192.168.31.124:9999/trash
 ```
 
 ## ⚠️ 故障排查
@@ -160,8 +164,8 @@ docker run --rm -v $(pwd)/configs:/configs \
 docker exec stm ffmpeg -version
 
 # 手动测试转码
-docker exec stm ffmpeg -i /input/test.mkv \
-  -c:v libx265 -crf 28 -preset medium \
+docker exec stm ffmpeg -i /mnt/pve/media/downloads/test.mkv \
+  -c:v libx264 -crf 28 -preset veryslow \
   -c:a aac -b:a 128k /tmp/test_output.mp4
 ```
 
@@ -171,7 +175,7 @@ docker exec stm ffmpeg -i /input/test.mkv \
 docker exec stm df -h
 
 # 手动清理回收站
-docker exec stm rm -rf /input/.stm_trash/*
+docker exec stm rm -rf /mnt/pve/media/downloads/.stm_trash/*
 ```
 
 ## 🔄 升级部署
@@ -204,4 +208,4 @@ docker compose up -d
 
 - 项目文档：查看 `/opt/stm/README.md`
 - 配置说明：查看 `/opt/stm/configs/config.yaml` 注释
-- Bug报告：查看 `BUGFIX_REPORT.md`
+- 测试与问题记录：查看 `docs/refactor/phase5-test-report.md`

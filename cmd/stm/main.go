@@ -9,12 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/stm/video-transcoder/internal/cleaner"
+	"github.com/stm/video-transcoder/internal/app"
 	"github.com/stm/video-transcoder/internal/config"
 	"github.com/stm/video-transcoder/internal/database"
-	"github.com/stm/video-transcoder/internal/scanner"
-	"github.com/stm/video-transcoder/internal/web"
-	"github.com/stm/video-transcoder/internal/worker"
 )
 
 func main() {
@@ -42,71 +39,71 @@ func main() {
 	}
 	defer db.Close()
 	log.Println("[Main] 数据库初始化成功")
+
 	if count, err := db.ResetProcessingTasksToPending(); err != nil {
 		log.Printf("[Main] 恢复未完成任务失败: %v", err)
 	} else if count > 0 {
 		log.Printf("[Main] 已恢复 %d 个未完成任务为待处理", count)
 	}
 
-	// 创建各模块实例
-	scan := scanner.New(cfg, db)
-	work := worker.New(cfg, db)
-	clean := cleaner.New(cfg, db)
-	webServer := web.New(cfg, db, scan, work, clean)
+	// 创建应用程序 Supervisor
+	application := app.New(cfg, db)
 
 	// 创建上下文用于优雅关闭
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 启动各模块的Goroutine
-	log.Println("[Main] 启动后台服务...")
-
-	// 启动扫描器
-	go scan.RunPeriodically(ctx)
-
-	// 启动Worker
-	go work.Run(ctx)
-
-	// 启动清理模块
-	go clean.Run(ctx)
-
 	// 设置信号处理
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
-	// 在单独的Goroutine中启动Web服务器
+	// 错误通道
+	errChan := make(chan error, 1)
+
+	// 启动应用程序
 	go func() {
-		if err := webServer.Start(":8080"); err != nil {
-			log.Fatalf("[Main] Web服务器启动失败: %v", err)
-		}
+		errChan <- application.Run(ctx)
 	}()
 
 	log.Println("[Main] 所有服务已启动")
 	log.Println("====================================")
 
-	// 等待停止信号
-	<-sigChan
-	log.Println("\n[Main] 收到关闭信号，开始优雅关闭...")
+	// 等待停止信号或错误
+	select {
+	case sig := <-sigChan:
+		log.Printf("\n[Main] 收到关闭信号 (%v)，开始优雅关闭...", sig)
+	case err := <-errChan:
+		if err != nil {
+			log.Printf("\n[Main] 应用程序错误: %v", err)
+		}
+		// Run 已经退出，无需再等待
+		log.Println("[Main] 程序已退出")
+		return
+	}
 
-	// 1. 取消上下文，通知所有Goroutine停止
+	// 1. 取消上下文，通知所有组件停止
 	cancel()
 
-	// 2. 关闭Web服务器（如果需要可以添加Shutdown方法）
-	log.Println("[Main] 正在关闭Web服务器...")
+	// 2. 等待 application.Run() 返回（包含 worker drain）
+	log.Println("[Main] 等待应用程序停止（最多30秒）...")
 
-	// 3. 等待 Worker 完成当前任务
-	log.Println("[Main] 等待Worker完成当前任务...")
-	// Worker.Run() 内部会通过 ctx.Done() 收到信号，
-	// 并在当前任务完成后退出，wg.Wait() 会等待所有worker goroutine结束
+	select {
+	case err := <-errChan:
+		if err != nil {
+			log.Printf("[Main] 应用程序关闭出错: %v", err)
+		} else {
+			log.Println("[Main] 应用程序已安全停止")
+		}
+	case <-time.After(30 * time.Second):
+		log.Println("[Main] ⚠️  等待超时，强制退出")
+	}
 
-	// 给一些时间让各模块优雅退出
-	log.Println("[Main] 等待后台服务停止（最多10秒）...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 3. 额外关闭 Web 服务器（如果 Run 中未完成）
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
+	if err := application.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[Main] Web 服务器关闭出错: %v", err)
+	}
 
-	// 这里可以添加具体的等待逻辑
-	// 例如: work.Wait(), scan.Wait() 等
-	<-shutdownCtx.Done()
-
-	log.Println("[Main] 服务已安全关闭")
+	log.Println("[Main] 程序已退出")
 }

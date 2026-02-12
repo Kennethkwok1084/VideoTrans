@@ -1,0 +1,43 @@
+groups:
+  - name: stm-phase5
+    rules:
+      - alert: STMInstanceDown
+        expr: up{job="stm"} == 0
+        for: 2m
+        labels:
+          severity: P0
+        annotations:
+          summary: "STM 实例不可用"
+          description: "实例 {{ $labels.instance }} 已离线超过 2 分钟"
+
+      - alert: STMTranscodeFailureRateHigh
+        expr: |
+          (
+            increase(stm_transcode_failed_total[15m])
+            /
+            clamp_min(increase(stm_transcode_failed_total[15m]) + increase(stm_transcode_success_total[15m]), 1)
+          ) > 0.05
+        for: 15m
+        labels:
+          severity: P1
+        annotations:
+          summary: "转码失败率升高"
+          description: "15 分钟失败率超过 5%"
+
+      - alert: STMCleanupErrorBacklog
+        expr: stm_tasks_total{status="cleanup_error"} >= 5
+        for: 10m
+        labels:
+          severity: P1
+        annotations:
+          summary: "cleanup_error 堆积"
+          description: "cleanup_error 任务数 >= 5 且持续 10 分钟"
+
+      - alert: STMPendingBacklogGrowing
+        expr: delta(stm_tasks_total{status="pending"}[30m]) > 10
+        for: 10m
+        labels:
+          severity: P2
+        annotations:
+          summary: "待处理队列持续增长"
+          description: "pending 队列 30 分钟净增长超过 10"

@@ -80,11 +80,14 @@ var (
 	)
 )
 
-// UpdateTaskStats 更新任务统计
-func UpdateTaskStats(pending, processing, completed, failed int) {
+// UpdateTaskStats 更新任务统计（覆盖完整生命周期状态）
+func UpdateTaskStats(pending, processing, completed, failed, softDeleted, hardDeleted, cleanupError int) {
 	TasksTotal.WithLabelValues("pending").Set(float64(pending))
 	TasksTotal.WithLabelValues("processing").Set(float64(processing))
 	TasksTotal.WithLabelValues("completed").Set(float64(completed))
 	TasksTotal.WithLabelValues("failed").Set(float64(failed))
+	TasksTotal.WithLabelValues("soft_deleted").Set(float64(softDeleted))
+	TasksTotal.WithLabelValues("hard_deleted").Set(float64(hardDeleted))
+	TasksTotal.WithLabelValues("cleanup_error").Set(float64(cleanupError))
 	TasksProcessing.Set(float64(processing))
 }

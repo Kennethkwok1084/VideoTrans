@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -261,7 +262,19 @@ func (w *Worker) scheduler(ctx context.Context) {
 
 			// 获取待处理任务
 			limit := cap(w.taskQueue) - len(w.taskQueue)
-			tasks, err := w.db.GetPendingTasks(limit)
+			
+			var tasks []*database.Task
+			var err error
+			
+			// Phase 4: 支持原子 Claim 调度
+			if w.config != nil && w.config.Scheduler.AtomicClaim {
+				// 使用原子 Claim 方式（pending -> processing 在 DB 层完成）
+				tasks, err = w.db.ClaimPendingTasks(limit)
+			} else {
+				// 传统方式（pending -> processing 在 Worker 处理时完成）
+				tasks, err = w.db.GetPendingTasks(limit)
+			}
+			
 			if err != nil {
 				log.Printf("[Scheduler] 获取待处理任务失败: %v", err)
 				continue
@@ -483,10 +496,14 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 				// 记录开始时间
 				startTime := time.Now()
 
-				// 更新状态为处理中
-				if err := w.db.UpdateTaskStatus(task.ID, database.StatusProcessing, ""); err != nil {
-					log.Printf("[Worker-%d] 更新任务状态失败: %v", workerID, err)
-					return
+				// Phase 4: 原子 Claim 模式下任务已经是 processing 状态
+				// 传统模式下需要在这里更新状态
+				if w.config == nil || !w.config.Scheduler.AtomicClaim {
+					// 更新状态为处理中
+					if err := w.db.UpdateTaskStatus(task.ID, database.StatusProcessing, ""); err != nil {
+						log.Printf("[Worker-%d] 更新任务状态失败: %v", workerID, err)
+						return
+					}
 				}
 
 				// 执行转码（使用独立的 context，不受 ctx.Done() 影响）
@@ -498,7 +515,7 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 
 					category, transient, corrupt := classifyError(errMsg)
 					if category != "" {
-						log.Printf("[Worker-%d] 🧭 失败原因: %s", workerID, category)
+						log.Printf("[Worker-%d] 🧭 失败原因: %s", workerID, getCategoryDescription(category))
 					}
 
 					// 截取关键错误信息（避免日志过长）
@@ -522,13 +539,55 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 							_ = w.db.UpdateTaskRepairMode(task.ID, "")
 							_ = w.db.UpdateTaskStatus(task.ID, database.StatusIrrecoverable, "文件损坏不可恢复")
 						}
-					} else if transient && nextRetry < 3 {
-						logMsg := errMsg
-						if category != "" {
-							logMsg = fmt.Sprintf("自动重试: %s\n%s", category, errMsg)
+					} else if w.isRetryable(category, transient) && nextRetry < 3 {
+						// Phase 4: 支持指数退避重试
+						if w.config != nil && w.config.Retry.BackoffEnabled {
+							// 使用指数退避 + 抖动
+							baseDelay := 60 // 默认 60 秒
+							maxDelay := 3600 // 默认 1 小时
+							if w.config.Retry.BaseDelaySeconds > 0 {
+								baseDelay = w.config.Retry.BaseDelaySeconds
+							}
+							if w.config.Retry.MaxDelaySeconds > 0 {
+								maxDelay = w.config.Retry.MaxDelaySeconds
+							}
+
+							// 指数退避: base * 2^(retry-1)
+							delay := baseDelay
+							for i := 1; i < nextRetry; i++ {
+								delay *= 2
+								if delay > maxDelay {
+									delay = maxDelay
+									break
+								}
+							}
+
+							// 添加随机抖动 (±20%)
+							jitter := float64(delay) * 0.2 * (2.0*rand.Float64() - 1.0)
+							finalDelay := delay + int(jitter)
+							if finalDelay < 1 {
+								finalDelay = 1
+							}
+
+							nextRetryAt := time.Now().Add(time.Duration(finalDelay) * time.Second)
+							logMsg := fmt.Sprintf("自动重试(%d/%d): %s\n将在 %s 后重试", nextRetry, 3, getCategoryDescription(category), time.Duration(finalDelay)*time.Second)
+							if category != "" {
+								logMsg += fmt.Sprintf("\n%s", errMsg)
+							}
+
+							_ = w.db.UpdateTaskStatus(task.ID, database.StatusFailed, logMsg) // 先设置日志
+							_ = w.db.ScheduleRetry(task.ID, nextRetryAt, category)
+
+							log.Printf("[Worker-%d] 📅 任务 #%d 将在 %d 秒后重试", workerID, task.ID, finalDelay)
+						} else {
+							// 传统模式：立即重试
+							logMsg := errMsg
+							if category != "" {
+								logMsg = fmt.Sprintf("自动重试: %s\n%s", getCategoryDescription(category), errMsg)
+							}
+							w.db.UpdateTaskProgress(task.ID, 0)
+							w.db.UpdateTaskStatus(task.ID, database.StatusPending, logMsg)
 						}
-						w.db.UpdateTaskProgress(task.ID, 0)
-						w.db.UpdateTaskStatus(task.ID, database.StatusPending, logMsg)
 					} else {
 						// 更新状态为失败（存储完整错误信息到数据库）
 						w.db.UpdateTaskStatus(task.ID, database.StatusFailed, errMsg)
@@ -931,15 +990,37 @@ func (w *Worker) parseProgress(reader *bufio.Reader, taskID int64, totalDuration
 	}
 }
 
+// isRetryable 检查错误类别是否允许重试
+func (w *Worker) isRetryable(category string, transient bool) bool {
+	// 如果没有配置白名单，使用 classifyError 的 transient 判断
+	if w.config == nil || len(w.config.Retry.RetryableErrors) == 0 {
+		return transient
+	}
+
+	// 配置了白名单，检查 category 是否在白名单中
+	for _, allowedCategory := range w.config.Retry.RetryableErrors {
+		if category == allowedCategory {
+			return true
+		}
+	}
+
+	return false
+}
+
 func classifyError(errMsg string) (string, bool, bool) {
 	lower := strings.ToLower(errMsg)
 
+	// timeout - 超时类错误（可重试）
 	if strings.Contains(errMsg, "进度超过") || strings.Contains(errMsg, "FFmpeg超时") || strings.Contains(errMsg, "ffprobe超时") {
-		return "疑似IO卡住或进程超时", true, false
+		return "timeout", true, false
 	}
+	
+	// output_error - 输出文件验证失败（可重试，可能是文件损坏）
 	if strings.Contains(errMsg, "输出文件验证失败") {
-		return "输出文件损坏", true, true
+		return "output_error", true, true
 	}
+	
+	// io_error - IO/挂载盘问题（可重试）
 	if strings.Contains(lower, "input/output error") ||
 		strings.Contains(lower, "i/o error") ||
 		strings.Contains(lower, "stale file handle") ||
@@ -949,11 +1030,15 @@ func classifyError(errMsg string) (string, bool, bool) {
 		strings.Contains(lower, "permission denied") ||
 		strings.Contains(lower, "no such file") ||
 		strings.Contains(lower, "broken pipe") {
-		return "疑似IO/挂载盘问题", true, false
+		return "io_error", true, false
 	}
+	
+	// disk_space - 磁盘空间不足（不可重试）
 	if strings.Contains(errMsg, "磁盘空间") {
-		return "磁盘空间不足", false, false
+		return "disk_space", false, false
 	}
+	
+	// invalid_data - 无效数据/文件损坏（不可重试，但可能触发修复模式）
 	if strings.Contains(errMsg, "文件检查失败") ||
 		strings.Contains(errMsg, "文件损坏") ||
 		strings.Contains(errMsg, "解码测试失败") ||
@@ -961,10 +1046,28 @@ func classifyError(errMsg string) (string, bool, bool) {
 		strings.Contains(errMsg, "Error splitting") ||
 		strings.Contains(errMsg, "Invalid data found") ||
 		strings.Contains(errMsg, "moov atom not found") {
-		return "文件损坏或格式不支持", false, true
+		return "invalid_data", false, true
 	}
 
-	return "未知原因", false, false
+	return "unknown", false, false
+}
+
+// getCategoryDescription 获取错误类别的中文描述
+func getCategoryDescription(category string) string {
+	switch category {
+	case "timeout":
+		return "疑似IO卡住或进程超时"
+	case "output_error":
+		return "输出文件损坏"
+	case "io_error":
+		return "疑似IO/挂载盘问题"
+	case "disk_space":
+		return "磁盘空间不足"
+	case "invalid_data":
+		return "文件损坏或格式不支持"
+	default:
+		return "未知原因"
+	}
 }
 
 type mountInfo struct {

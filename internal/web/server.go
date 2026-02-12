@@ -2,12 +2,14 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -19,14 +21,23 @@ import (
 	"github.com/stm/video-transcoder/internal/worker"
 )
 
+// ScanRunner 定义扫描器接口
+type ScanRunner interface {
+	Scan(ctx context.Context) error
+	StartScanAsync(ctx context.Context) error
+}
+
 // Server Web服务器
 type Server struct {
-	config  *config.Config
-	db      *database.DB
-	scanner *scanner.Scanner
-	worker  *worker.Worker
-	cleaner *cleaner.Cleaner
-	router  *gin.Engine
+	config        *config.Config
+	db            *database.DB
+	scanner       ScanRunner // 使用接口替代具体实现
+	worker        *worker.Worker
+	cleaner       *cleaner.Cleaner
+	router        *gin.Engine
+	srv           *http.Server
+	ctx           context.Context // 应用程序生命周期 context
+	metricsCancel context.CancelFunc
 }
 
 // New 创建Web服务器实例
@@ -37,7 +48,31 @@ func New(cfg *config.Config, db *database.DB, scan *scanner.Scanner, work *worke
 	router := gin.Default()
 
 	// 加载HTML模板
-	router.LoadHTMLGlob("/app/templates/*.html")
+	templatePath := cfg.Path.Templates
+	if templatePath == "" {
+		templatePath = "/app/templates"
+	}
+	// 确保路径以 / 结尾以便拼接 glob
+	if !strings.HasSuffix(templatePath, "/") {
+		templatePath += "/"
+	}
+
+	// 检查目录是否存在，如果不存在则尝试默认本地路径（用于开发环境）
+	if _, err := os.Stat(templatePath); os.IsNotExist(err) {
+		// 尝试多个本地回退路径
+		candidates := []string{
+			"internal/web/templates/", // 源代码结构
+			"templates/",              // 工作目录
+		}
+		for _, path := range candidates {
+			if _, err := os.Stat(path); err == nil {
+				templatePath = path
+				break
+			}
+		}
+	}
+
+	router.LoadHTMLGlob(templatePath + "*.html")
 
 	s := &Server{
 		config:  cfg,
@@ -50,6 +85,11 @@ func New(cfg *config.Config, db *database.DB, scan *scanner.Scanner, work *worke
 
 	s.setupRoutes()
 	return s
+}
+
+// SetContext 设置应用程序生命周期 context
+func (s *Server) SetContext(ctx context.Context) {
+	s.ctx = ctx
 }
 
 // setupRoutes 设置路由
@@ -94,21 +134,56 @@ func (s *Server) handleGetStats(c *gin.Context) {
 		return
 	}
 
-	// 更新 Prometheus metrics
+	s.updateTaskMetrics(stats)
+
+	c.JSON(http.StatusOK, gin.H{
+		"pending":       stats.PendingCount,
+		"processing":    stats.ProcessingCount,
+		"completed":     stats.CompletedCount,
+		"failed":        stats.FailedCount,
+		"soft_deleted":  stats.SoftDeletedCount,
+		"hard_deleted":  stats.HardDeletedCount,
+		"cleanup_error": stats.CleanupErrorCount,
+		"saved_gb":      float64(stats.TotalSaved) / 1024 / 1024 / 1024,
+	})
+}
+
+func (s *Server) updateTaskMetrics(stats *database.Stats) {
 	metrics.UpdateTaskStats(
 		stats.PendingCount,
 		stats.ProcessingCount,
 		stats.CompletedCount,
 		stats.FailedCount,
+		stats.SoftDeletedCount,
+		stats.HardDeletedCount,
+		stats.CleanupErrorCount,
 	)
+}
 
-	c.JSON(http.StatusOK, gin.H{
-		"pending":    stats.PendingCount,
-		"processing": stats.ProcessingCount,
-		"completed":  stats.CompletedCount,
-		"failed":     stats.FailedCount,
-		"saved_gb":   float64(stats.TotalSaved) / 1024 / 1024 / 1024,
-	})
+func (s *Server) startMetricsSync(ctx context.Context) {
+	// 启动时先同步一次，避免冷启动阶段指标全 0
+	if stats, err := s.db.GetStats(); err == nil {
+		s.updateTaskMetrics(stats)
+	} else {
+		log.Printf("[Web] 初始指标同步失败: %v", err)
+	}
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stats, err := s.db.GetStats()
+			if err != nil {
+				log.Printf("[Web] 指标同步失败: %v", err)
+				continue
+			}
+			s.updateTaskMetrics(stats)
+		}
+	}
 }
 
 // handleGetTasks 获取任务列表
@@ -143,15 +218,23 @@ func (s *Server) handleGetTasks(c *gin.Context) {
 func (s *Server) handleTriggerScan(c *gin.Context) {
 	log.Printf("[API] 收到手动扫描请求，来自: %s", c.ClientIP())
 
-	go func() {
-		// 使用独立的 context，不绑定到 HTTP 请求生命周期
-		ctx := context.Background()
-		log.Printf("[API] 启动扫描 goroutine，context 类型: %T, 已取消: %v", ctx, ctx.Err() != nil)
+	// 使用应用程序生命周期 context，如果未设置则使用 Background
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+		log.Println("[API] 警告：Server context 未设置，使用 Background context")
+	}
 
-		if err := s.scanner.Scan(ctx); err != nil {
-			log.Printf("手动扫描失败: %v", err)
+	// 尝试异步启动扫描
+	if err := s.scanner.StartScanAsync(ctx); err != nil {
+		if errors.Is(err, scanner.ErrScanInProgress) {
+			c.JSON(http.StatusConflict, gin.H{"error": "扫描正在进行中"})
+			return
 		}
-	}()
+		// 其他启动错误（如果有）
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "启动扫描失败: " + err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "扫描已启动"})
 }
@@ -299,8 +382,14 @@ func (s *Server) handleAddDirectory(c *gin.Context) {
 		log.Printf("[API] 保存配置失败: %v", err)
 	}
 
+	// 使用应用程序生命周期 context，如果未设置则使用 Background
 	go func() {
-		if err := s.scanner.Scan(context.Background()); err != nil {
+		ctx := s.ctx
+		if ctx == nil {
+			ctx = context.Background()
+			log.Println("[API] 警告：Server context 未设置，使用 Background context")
+		}
+		if err := s.scanner.Scan(ctx); err != nil {
 			log.Printf("[API] 新增目录后立即扫描失败: %v", err)
 		}
 	}()
@@ -458,8 +547,13 @@ func (s *Server) handleHealth(c *gin.Context) {
 		dbOk = false
 	}
 
-	// 获取 Worker 状态
-	workerOk := s.worker.GetWorkerCount() >= 0
+	// 获取 Worker 状态：
+	// - 工作时间或强制运行：至少有 1 个 worker 才算健康
+	// - 非工作时间：worker 为 0 是预期行为，视为健康
+	workerOk := true
+	if s.worker.IsWorkingHours() || s.worker.GetForceRun() {
+		workerOk = s.worker.GetWorkerCount() > 0
+	}
 
 	// 总体健康状态
 	healthy := dbOk && workerOk
@@ -495,7 +589,33 @@ func (s *Server) getWorkerMode() string {
 // Start 启动Web服务器
 func (s *Server) Start(addr string) error {
 	log.Printf("[Web] 启动Web服务器: http://%s", addr)
-	return s.router.Run(addr)
+
+	metricsCtx, cancel := context.WithCancel(context.Background())
+	s.metricsCancel = cancel
+	go s.startMetricsSync(metricsCtx)
+
+	s.srv = &http.Server{
+		Addr:    addr,
+		Handler: s.router,
+	}
+
+	if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// 启动失败时取消 metricsSync goroutine，避免泄漏
+		cancel()
+		return err
+	}
+	return nil
+}
+
+// Shutdown 优雅关闭Web服务器
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.metricsCancel != nil {
+		s.metricsCancel()
+	}
+	if s.srv != nil {
+		return s.srv.Shutdown(ctx)
+	}
+	return nil
 }
 
 func (s *Server) getDefaultBrowsePath() string {

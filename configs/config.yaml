@@ -1,11 +1,24 @@
 system:
   cron_start: 0
   cron_end: 0
-  max_workers: 3  # Ryzen 3500X 建议设为 3
+  max_workers: 3  
   scan_interval: 10  # 扫描间隔（分钟）
   scheduler_interval: 10  # 调度器检查间隔（秒）
   task_queue_size: 10  # 任务队列容量
   min_disk_space_gb: 5  # 最小磁盘空间要求（GB）
+
+scheduler:
+  atomic_claim: true  # 启用原子 Claim 调度（Phase 4 优化）
+
+retry:
+  backoff_enabled: true  # 启用指数退避重试（Phase 4 优化）
+  base_delay_seconds: 60  # 基础延迟时间（秒）
+  max_delay_seconds: 3600  # 最大延迟时间（1小时）
+  # 可重试错误白名单（留空使用默认分类逻辑）
+  retryable_errors:
+    - "timeout"           # 超时（IO卡住或进程超时）
+    - "output_error"      # 输出文件损坏
+    - "io_error"          # IO/挂载盘问题
 
 path:
   # 输入输出目录配对（可在Web界面管理）
@@ -48,6 +61,7 @@ ffmpeg:
 cleaning:
   soft_delete_days: 7   # 移入垃圾桶天数
   hard_delete_days: 30  # 彻底删除天数
+  cleanup_retry_batch: 200  # cleanup_error 自动重试批次
   cron: "0 10 * * *"    # 清理任务时间（Cron 表达式）
 
 log:

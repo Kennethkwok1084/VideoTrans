@@ -2,21 +2,36 @@ package scanner
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stm/video-transcoder/internal/config"
 	"github.com/stm/video-transcoder/internal/database"
 )
 
+// ErrScanInProgress 表示扫描正在进行中
+var ErrScanInProgress = fmt.Errorf("扫描正在进行中")
+
+// ErrVerifyAborted 表示校验过程被中断
+var ErrVerifyAborted = fmt.Errorf("校验过程被中断")
+
 // Scanner 目录扫描器
 type Scanner struct {
 	config *config.Config
 	db     *database.DB
+	lastVerifyTime time.Time
+	mu             sync.Mutex
+	running        bool
+	
+	// 测试钩子
+	beforeScan func()
 }
 
 // New 创建扫描器实例
@@ -24,11 +39,67 @@ func New(cfg *config.Config, db *database.DB) *Scanner {
 	return &Scanner{
 		config: cfg,
 		db:     db,
+		// 初始化为一个过去的时间（例如 24 小时前），以避免重启后全量校验
+		// 但又能在首次运行时校验最近的任务
+		lastVerifyTime: time.Now().Add(-24 * time.Hour),
 	}
 }
 
-// Scan 扫描输入目录并更新数据库
+// StartScanAsync 尝试启动异步扫描。
+// 如果已有扫描在运行，返回 ErrScanInProgress。
+func (s *Scanner) StartScanAsync(ctx context.Context) error {
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return ErrScanInProgress
+	}
+	s.running = true
+	s.mu.Unlock()
+
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+		}()
+
+		if s.beforeScan != nil {
+			s.beforeScan()
+		}
+
+		if err := s.doScan(ctx); err != nil {
+			log.Printf("[Scanner] 异步扫描失败: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+// Scan 扫描输入目录并更新数据库（同步阻塞）
 func (s *Scanner) Scan(ctx context.Context) error {
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return ErrScanInProgress
+	}
+	s.running = true
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+	}()
+
+	if s.beforeScan != nil {
+		s.beforeScan()
+	}
+
+	return s.doScan(ctx)
+}
+
+// doScan 执行实际的扫描逻辑
+func (s *Scanner) doScan(ctx context.Context) error {
 	// 调试日志：检查 context 状态
 	if ctx.Err() != nil {
 		log.Printf("[Scanner] ⚠️  WARNING: Scan 启动时 context 已被取消: %v", ctx.Err())
@@ -64,8 +135,19 @@ func (s *Scanner) Scan(ctx context.Context) error {
 	log.Printf("[Scanner] 扫描完成，耗时: %v，新增: %d, 更新: %d, 跳过: %d",
 		elapsed, totalNew, totalUpdate, totalSkip)
 
-	if err := s.verifyCompletedOutputs(ctx); err != nil {
-		log.Printf("[Scanner] 输出校验失败: %v", err)
+	if newWatermark, err := s.verifyCompletedOutputs(ctx, s.lastVerifyTime); err != nil {
+		if errors.Is(err, ErrVerifyAborted) {
+			log.Printf("[Scanner] 输出校验中断，部分任务未完成校验")
+		} else {
+			log.Printf("[Scanner] 输出校验失败: %v", err)
+		}
+		// 即使中断或失败，也可能部分推进了水位
+		if newWatermark.After(s.lastVerifyTime) {
+			log.Printf("[Scanner] 水位推进到: %v", newWatermark)
+			s.lastVerifyTime = newWatermark
+		}
+	} else {
+		s.lastVerifyTime = newWatermark
 	}
 
 	return nil
@@ -276,7 +358,9 @@ func (s *Scanner) RunPeriodically(ctx context.Context) {
 
 	// 立即执行一次
 	if err := s.Scan(ctx); err != nil && err != context.Canceled {
-		log.Printf("[Scanner] 扫描失败: %v", err)
+		if !errors.Is(err, ErrScanInProgress) {
+			log.Printf("[Scanner] 扫描失败: %v", err)
+		}
 	}
 
 	// 周期性执行
@@ -287,7 +371,9 @@ func (s *Scanner) RunPeriodically(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := s.Scan(ctx); err != nil && err != context.Canceled {
-				log.Printf("[Scanner] 扫描失败: %v", err)
+				if !errors.Is(err, ErrScanInProgress) {
+					log.Printf("[Scanner] 扫描失败: %v", err)
+				}
 			}
 		}
 	}

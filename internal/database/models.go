@@ -14,6 +14,10 @@ const (
 	StatusCompleted     TaskStatus = "completed"
 	StatusFailed        TaskStatus = "failed"
 	StatusIrrecoverable TaskStatus = "irrecoverable"
+	// 清理生命周期状态
+	StatusSoftDeleted  TaskStatus = "soft_deleted"  // 源文件已移入垃圾桶
+	StatusHardDeleted  TaskStatus = "hard_deleted"  // 源文件已彻底删除
+	StatusCleanupError TaskStatus = "cleanup_error" // 清理动作失败
 )
 
 // Task 转码任务模型
@@ -30,6 +34,13 @@ type Task struct {
 	CreatedAt   time.Time      `db:"created_at" json:"created_at"`     // 创建时间
 	CompletedAt *time.Time     `db:"completed_at" json:"completed_at"` // 完成时间
 	Log         sql.NullString `db:"log" json:"log"`                   // 日志信息（可为NULL）
+	// 清理生命周期字段
+	SourceDeletedAt sql.NullTime   `db:"source_deleted_at" json:"source_deleted_at"` // 源文件删除时间
+	TrashPath       sql.NullString `db:"trash_path" json:"trash_path"`               // 垃圾桶路径
+	CleanupLog      sql.NullString `db:"cleanup_log" json:"cleanup_log"`             // 清理日志
+	// Phase 4: 指数退避重试字段
+	NextRetryAt       sql.NullTime   `db:"next_retry_at" json:"next_retry_at"`             // 下次重试时间
+	LastErrorCategory sql.NullString `db:"last_error_category" json:"last_error_category"` // 最后错误类别
 }
 
 // GetLog 获取日志内容
@@ -49,11 +60,48 @@ func (t *Task) SetLog(log string) {
 	}
 }
 
+// GetTrashPath 获取垃圾桶路径
+func (t *Task) GetTrashPath() string {
+	if t.TrashPath.Valid {
+		return t.TrashPath.String
+	}
+	return ""
+}
+
+// SetTrashPath 设置垃圾桶路径
+func (t *Task) SetTrashPath(path string) {
+	if path == "" {
+		t.TrashPath = sql.NullString{Valid: false}
+	} else {
+		t.TrashPath = sql.NullString{String: path, Valid: true}
+	}
+}
+
+// GetCleanupLog 获取清理日志
+func (t *Task) GetCleanupLog() string {
+	if t.CleanupLog.Valid {
+		return t.CleanupLog.String
+	}
+	return ""
+}
+
+// SetCleanupLog 设置清理日志
+func (t *Task) SetCleanupLog(log string) {
+	if log == "" {
+		t.CleanupLog = sql.NullString{Valid: false}
+	} else {
+		t.CleanupLog = sql.NullString{String: log, Valid: true}
+	}
+}
+
 // Stats 统计信息
 type Stats struct {
-	PendingCount    int   `db:"pending_count" json:"pending_count"`
-	ProcessingCount int   `db:"processing_count" json:"processing_count"`
-	CompletedCount  int   `db:"completed_count" json:"completed_count"`
-	FailedCount     int   `db:"failed_count" json:"failed_count"`
-	TotalSaved      int64 `db:"total_saved" json:"total_saved"` // 节省的空间（字节）
+	PendingCount      int   `db:"pending_count" json:"pending_count"`
+	ProcessingCount   int   `db:"processing_count" json:"processing_count"`
+	CompletedCount    int   `db:"completed_count" json:"completed_count"`
+	FailedCount       int   `db:"failed_count" json:"failed_count"`
+	SoftDeletedCount  int   `db:"soft_deleted_count" json:"soft_deleted_count"`
+	HardDeletedCount  int   `db:"hard_deleted_count" json:"hard_deleted_count"`
+	CleanupErrorCount int   `db:"cleanup_error_count" json:"cleanup_error_count"`
+	TotalSaved        int64 `db:"total_saved" json:"total_saved"` // 节省的空间（字节）
 }

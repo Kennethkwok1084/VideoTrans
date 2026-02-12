@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.24-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-23%2F23-success.svg)](TEST_SUMMARY.md)
+![Tests](https://img.shields.io/badge/Tests-23%2F23-success.svg)
 
 ## 📖 项目简介
 
@@ -40,16 +40,19 @@ cd stm
 
 2. **修改配置**
 
-编辑 `docker-compose.yml`，设置你的输入/输出目录：
+编辑 `docker-compose.yml`，确认挂载与端口：
 
 ```yaml
 volumes:
-  - /mnt/nas/media/downloads:/input      # 源视频目录
-  - /mnt/nas/media/archive:/output       # 转码后输出目录
-  - ./data:/data                          # 数据库和日志
+  - /mnt:/mnt                               # 媒体目录根路径
+  - ./data:/data                            # 数据库和日志
+  - ./configs/config.yaml:/app/config.yaml:ro
+
+ports:
+  - "9999:8080"
 ```
 
-编辑 `configs/config.yaml` 调整转码参数（可选）。
+编辑 `configs/config.yaml` 中的 `path.pairs`，设置输入/输出目录映射。
 
 3. **启动服务**
 
@@ -66,7 +69,7 @@ docker-compose logs -f
 
 4. **访问 Web 界面**
 
-打开浏览器访问：`http://your-server-ip:8080`
+打开浏览器访问：`http://your-server-ip:9999`
 
 ### 本地运行（开发环境）
 
@@ -94,18 +97,18 @@ cp configs/config.yaml my-config.yaml
 ### 核心配置项
 
 ```yaml
-# 路径配置
+# 路径配置（configs/config.yaml）
 path:
-  input: "/input"            # 输入目录
-  output: "/output"          # 输出目录
+  pairs:
+    - input: "/mnt/pve/media/downloads"   # 输入目录
+      output: "/mnt/pve/media/archive"    # 输出目录
   trash: ".stm_trash"        # 垃圾桶目录名
+  database: "/data/tasks.db" # 数据库路径
 
 # 系统配置
 system:
-  db_path: "/data/stm.db"    # 数据库路径
   max_workers: 3             # 并发转码数
-  cron_start: 0              # 工作开始时间（小时）
-  cron_end: 0                # 工作结束时间（小时，0-0 表示全天）
+  scan_interval: 10          # 扫描间隔（分钟）
   scheduler_interval: 10     # 调度器检查间隔（秒）
   task_queue_size: 10        # 任务队列容量
   min_disk_space_gb: 5       # 最小磁盘空间要求（GB）
@@ -114,7 +117,7 @@ system:
 ffmpeg:
   codec: "libx264"           # 视频编码器
   preset: "veryslow"         # 预设（slow/veryslow）
-  crf: 27                    # 质量（18-28，越大体积越小）
+  crf: 28                    # 质量（18-28，越大体积越小）
   audio: "aac"               # 音频编码器
   audio_bitrate: "128k"      # 音频比特率
 
@@ -124,24 +127,24 @@ cleaning:
   hard_delete_days: 30       # 彻底删除天数
   cron: "0 10 * * *"         # 清理任务时间（Cron 表达式）
 
-# Web 配置
-web:
-  port: ":8080"              # Web 端口
+# 对外访问端口（docker-compose.yml）
+ports:
+  - "9999:8080"
 ```
 
 ### 环境变量覆盖
 
 ```bash
 STM_MAX_WORKERS=3           # 覆盖并发数
-STM_INPUT_PATH=/path/to/input
-STM_OUTPUT_PATH=/path/to/output
+STM_INPUT_PATH=/mnt/pve/media/downloads
+STM_OUTPUT_PATH=/mnt/pve/media/archive
 ```
 
 ## 📊 使用指南
 
 ### Web 界面功能
 
-#### 1. 仪表盘 (`http://localhost:8080`)
+#### 1. 仪表盘 (`http://localhost:9999`)
 - **实时统计卡片**：
   - 待处理任务数（黄色）
   - 处理中任务数（蓝色）
@@ -151,13 +154,13 @@ STM_OUTPUT_PATH=/path/to/output
 - **失败任务列表**：快速查看和重试失败任务
 - **控制按钮**：扫描目录、强制启动、停止强制
 
-#### 2. 任务列表 (`http://localhost:8080/tasks`)
+#### 2. 任务列表 (`http://localhost:9999/tasks`)
 - **状态筛选**：全部/待处理/处理中/已完成/失败
 - **任务表格**：文件名、状态、进度条、大小变化、创建时间
 - **操作按钮**：重试失败任务、删除任务记录
 - **分页控件**：每页 20 条，支持翻页
 
-#### 3. 垃圾桶 (`http://localhost:8080/trash`)
+#### 3. 垃圾桶 (`http://localhost:9999/trash`)
 - **警告提示**：30 天自动删除提醒
 - **文件列表**：文件名、大小、删除时间、剩余天数
 - **倒计时提示**：3天内红色，7天内黄色
@@ -206,7 +209,7 @@ GET /metrics
 scrape_configs:
   - job_name: 'stm'
     static_configs:
-      - targets: ['localhost:8080']
+      - targets: ['localhost:9999']
     metrics_path: /metrics
     scrape_interval: 15s
 ```

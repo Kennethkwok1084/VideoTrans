@@ -7,18 +7,21 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
 
 // Config 全局配置结构
 type Config struct {
-	mu         sync.RWMutex   `yaml:"-"`
-	ConfigPath string         `yaml:"-"`
-	System     SystemConfig   `yaml:"system"`
-	Path       PathConfig     `yaml:"path"`
-	FFmpeg     FFmpegConfig   `yaml:"ffmpeg"`
-	Cleaning   CleaningConfig `yaml:"cleaning"`
-	Log        LogConfig      `yaml:"log"`
+	mu         sync.RWMutex    `yaml:"-"`
+	ConfigPath string          `yaml:"-"`
+	System     SystemConfig    `yaml:"system"`
+	Scheduler  SchedulerConfig `yaml:"scheduler"`
+	Retry      RetryConfig     `yaml:"retry"`
+	Path       PathConfig      `yaml:"path"`
+	FFmpeg     FFmpegConfig    `yaml:"ffmpeg"`
+	Cleaning   CleaningConfig  `yaml:"cleaning"`
+	Log        LogConfig       `yaml:"log"`
 }
 
 // SystemConfig 系统配置
@@ -32,14 +35,28 @@ type SystemConfig struct {
 	MinDiskSpaceGB    int `yaml:"min_disk_space_gb"`  // 最小磁盘空间要求（GB）
 }
 
+// SchedulerConfig 调度器配置
+type SchedulerConfig struct {
+	AtomicClaim bool `yaml:"atomic_claim"` // 启用原子 Claim 调度（Phase 4 优化）
+}
+
+// RetryConfig 重试配置
+type RetryConfig struct {
+	BackoffEnabled   bool     `yaml:"backoff_enabled"`    // 启用指数退避
+	BaseDelaySeconds int      `yaml:"base_delay_seconds"` // 基础延迟（秒）
+	MaxDelaySeconds  int      `yaml:"max_delay_seconds"`  // 最大延迟（秒）
+	RetryableErrors  []string `yaml:"retryable_errors"`   // 可重试错误白名单
+}
+
 // PathConfig 路径配置
 type PathConfig struct {
-	Input    string            `yaml:"input"`    // 默认输入目录（保持兼容性）
-	Inputs   []string          `yaml:"inputs"`   // 多个输入目录（已废弃，使用Pairs）
-	Output   string            `yaml:"output"`   // 默认输出目录（保持兼容性）
-	Pairs    []InputOutputPair `yaml:"pairs"`    // 输入输出目录配对
-	Trash    string            `yaml:"trash"`    // 垃圾桶目录名
-	Database string            `yaml:"database"` // 数据库文件路径
+	Input     string            `yaml:"input"`     // 默认输入目录（保持兼容性）
+	Inputs    []string          `yaml:"inputs"`    // 多个输入目录（已废弃，使用Pairs）
+	Output    string            `yaml:"output"`    // 默认输出目录（保持兼容性）
+	Pairs     []InputOutputPair `yaml:"pairs"`     // 输入输出目录配对
+	Trash     string            `yaml:"trash"`     // 垃圾桶目录名
+	Database  string            `yaml:"database"`  // 数据库文件路径
+	Templates string            `yaml:"templates"` // Web模板路径
 }
 
 // InputOutputPair 输入输出目录配对
@@ -75,9 +92,10 @@ type FFmpegConfig struct {
 
 // CleaningConfig 清理配置
 type CleaningConfig struct {
-	SoftDeleteDays int    `yaml:"soft_delete_days"` // 移入垃圾桶天数
-	HardDeleteDays int    `yaml:"hard_delete_days"` // 彻底删除天数
-	Cron           string `yaml:"cron"`             // 清理任务 Cron 表达式
+	SoftDeleteDays    int    `yaml:"soft_delete_days"`    // 移入垃圾桶天数
+	HardDeleteDays    int    `yaml:"hard_delete_days"`    // 彻底删除天数
+	CleanupRetryBatch int    `yaml:"cleanup_retry_batch"` // cleanup_error 自动重试批次
+	Cron              string `yaml:"cron"`                // 清理任务 Cron 表达式
 }
 
 // LogConfig 日志配置
@@ -205,8 +223,20 @@ func (c *Config) Validate() error {
 	if c.Cleaning.HardDeleteDays < c.Cleaning.SoftDeleteDays {
 		return fmt.Errorf("hard_delete_days 必须大于等于 soft_delete_days")
 	}
+	if c.Cleaning.CleanupRetryBatch < 0 {
+		return fmt.Errorf("cleanup_retry_batch 不能为负数")
+	}
+	if c.Cleaning.CleanupRetryBatch == 0 {
+		c.Cleaning.CleanupRetryBatch = 200
+	}
 	if strings.TrimSpace(c.Cleaning.Cron) == "" {
 		c.Cleaning.Cron = "0 10 * * *" // 默认每天 10:00
+	} else {
+		// 校验 cron 语法，避免 Cleaner 启动后静默失败
+		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+		if _, err := parser.Parse(strings.TrimSpace(c.Cleaning.Cron)); err != nil {
+			return fmt.Errorf("cleaning.cron 语法无效: %v", err)
+		}
 	}
 
 	// 设置 FFmpeg 默认值
@@ -296,6 +326,9 @@ func (c *Config) applyEnvOverrides() {
 	if val := os.Getenv("STM_OUTPUT_PATH"); val != "" {
 		c.Path.Output = val
 	}
+	if val := os.Getenv("STM_TEMPLATES_PATH"); val != "" {
+		c.Path.Templates = val
+	}
 }
 
 // Save 将当前配置持久化到文件。
@@ -303,17 +336,20 @@ func (c *Config) Save() error {
 	c.mu.RLock()
 	configPath := c.ConfigPath
 	snapshot := Config{
-		System:   c.System,
-		FFmpeg:   c.FFmpeg,
-		Cleaning: c.Cleaning,
-		Log:      c.Log,
+		System:    c.System,
+		Scheduler: c.Scheduler,
+		Retry:     c.Retry,
+		FFmpeg:    c.FFmpeg,
+		Cleaning:  c.Cleaning,
+		Log:       c.Log,
 		Path: PathConfig{
-			Input:    c.Path.Input,
-			Inputs:   append([]string(nil), c.Path.Inputs...),
-			Output:   c.Path.Output,
-			Pairs:    append([]InputOutputPair(nil), c.Path.Pairs...),
-			Trash:    c.Path.Trash,
-			Database: c.Path.Database,
+			Input:     c.Path.Input,
+			Inputs:    append([]string(nil), c.Path.Inputs...),
+			Output:    c.Path.Output,
+			Pairs:     append([]InputOutputPair(nil), c.Path.Pairs...),
+			Trash:     c.Path.Trash,
+			Database:  c.Path.Database,
+			Templates: c.Path.Templates,
 		},
 	}
 	c.mu.RUnlock()
@@ -441,6 +477,28 @@ func (c *Config) GetOutputDir(path string) string {
 		return c.Path.Pairs[0].Output
 	}
 	return c.Path.Output
+}
+
+// GetInputRoot 根据文件路径查找所属的输入目录根路径
+func (c *Config) GetInputRoot(path string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, pair := range c.Path.Pairs {
+		// 检查路径是否在该输入目录下
+		if rel, err := filepath.Rel(pair.Input, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return pair.Input
+		}
+	}
+
+	// 如果找不到，尝试匹配默认 Input
+	if c.Path.Input != "" {
+		if rel, err := filepath.Rel(c.Path.Input, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return c.Path.Input
+		}
+	}
+
+	return ""
 }
 
 // GetPairs 获取所有输入输出配对
