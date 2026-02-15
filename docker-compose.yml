@@ -13,8 +13,8 @@ services:
       - /mnt:/mnt
       # 数据库和日志
       - ./data:/data
-      # 配置文件（只读）
-      - ./configs/config.yaml:/app/config.yaml:ro
+      # 配置文件（可写，支持 Web 保存）
+      - ./configs/config.yaml:/app/config.yaml
 
     environment:
       - PUID=1000

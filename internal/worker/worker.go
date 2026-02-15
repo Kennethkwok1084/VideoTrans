@@ -176,6 +176,18 @@ func (w *Worker) GetMaxWorkers() int {
 	return w.maxWorkers
 }
 
+// GetActiveTaskCount 获取当前正在处理的任务数
+func (w *Worker) GetActiveTaskCount() int64 {
+	return w.getActiveTasks()
+}
+
+// IsDraining 返回是否处于非工作时间排空阶段
+func (w *Worker) IsDraining() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.workersStopped && w.workerCount > 0
+}
+
 func (w *Worker) getActiveTasks() int64 {
 	return atomic.LoadInt64(&w.activeTasks)
 }
@@ -255,13 +267,23 @@ func (w *Worker) scheduler(ctx context.Context) {
 				continue
 			}
 
-			// 检查队列容量
-			if len(w.taskQueue) >= cap(w.taskQueue) {
-				continue // 队列已满，跳过本次调度
+			// 按可用并发槽位调度，避免一次性 claim 过多任务（例如 3 worker + 10 queue = 13 processing）
+			activeTasks := int(w.getActiveTasks())
+			queuedTasks := len(w.taskQueue)
+			targetWorkers := w.getTargetWorkerCount()
+			availableSlots := targetWorkers - activeTasks - queuedTasks
+			if availableSlots <= 0 {
+				continue
 			}
 
-			// 获取待处理任务
-			limit := cap(w.taskQueue) - len(w.taskQueue)
+			queueCapacityLeft := cap(w.taskQueue) - queuedTasks
+			limit := availableSlots
+			if limit > queueCapacityLeft {
+				limit = queueCapacityLeft
+			}
+			if limit <= 0 {
+				continue
+			}
 			
 			var tasks []*database.Task
 			var err error
@@ -412,7 +434,21 @@ func (w *Worker) adjustWorkerPool(ctx context.Context, targetCount int) {
 		metrics.WorkersActive.Set(0)
 		return
 
-	} else if currentCount > 0 && targetCount > 0 && currentCount != targetCount {
+	} else if currentCount > 0 && targetCount > 0 {
+		// 修复：即使 currentCount == targetCount，如果处于排空状态也需要恢复调度
+		if w.workersStopped && currentCount == targetCount {
+			w.workersStopped = false
+			w.mu.Unlock()
+			log.Printf("[WorkerPool] 从排空状态恢复调度（Worker数量保持=%d）", targetCount)
+			return
+		}
+
+		if currentCount == targetCount {
+			// 数量相同且未排空，无需调整
+			w.mu.Unlock()
+			return
+		}
+
 		if targetCount > currentCount {
 			// 扩容：直接新增 Worker
 			startIndex := currentCount + 1

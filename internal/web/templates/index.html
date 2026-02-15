@@ -69,7 +69,8 @@
                             <span id="statusText" class="text-sm font-medium">加载中...</span>
                         </div>
                         <div class="text-sm text-gray-600">
-                            <span id="workerCount">0</span> / <span id="maxWorkers">3</span> 个 Worker 运行中
+                            已启动 <span id="workerCount">0</span> / <span id="maxWorkers">3</span> 个 Worker，
+                            处理中 <span id="activeTasks">0</span> 个任务
                         </div>
                         <div class="flex items-center space-x-2">
                             <label class="text-sm text-gray-600">最大并发:</label>
@@ -478,6 +479,7 @@
 
                 document.getElementById('workerCount').textContent = workerStatus.worker_count || 0;
                 document.getElementById('maxWorkers').textContent = workerStatus.max_workers || 3;
+                document.getElementById('activeTasks').textContent = workerStatus.active_tasks || 0;
                 document.getElementById('inputMaxWorkers').value = workerStatus.max_workers || 3;
                 statusText.textContent = workerStatus.mode;
 
@@ -612,7 +614,8 @@
                 });
                 const data = await res.json();
                 if (res.ok) {
-                    alert(`最大Worker数量已更新为: ${maxWorkers}`);
+                    const warning = data.warning ? `\n注意: ${data.warning}` : '';
+                    alert(`最大Worker数量已更新为: ${maxWorkers}${warning}`);
                     loadWorkerStatus();
                 } else {
                     alert('设置失败: ' + data.error);

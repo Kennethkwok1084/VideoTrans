@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -114,6 +115,7 @@ func (s *Server) setupRoutes() {
 		api.GET("/directories/browse", s.handleBrowseDirectory) // 新增：浏览目录
 		api.GET("/trash", s.handleGetTrash)
 		api.DELETE("/trash/:filename", s.handleDeleteTrash)
+		api.POST("/trash/restore", s.handleRestoreTrash)
 		api.GET("/health", s.handleHealth)
 	}
 
@@ -305,13 +307,17 @@ func (s *Server) handleWorkerStatus(c *gin.Context) {
 	forceRun := s.worker.GetForceRun()
 	workerCount := s.worker.GetWorkerCount()
 	maxWorkers := s.worker.GetMaxWorkers()
+	activeTasks := s.worker.GetActiveTaskCount()
+	draining := s.worker.IsDraining()
 
 	c.JSON(http.StatusOK, gin.H{
 		"is_working_hours": isWorking,
 		"force_run":        forceRun,
 		"worker_count":     workerCount,
 		"max_workers":      maxWorkers,
-		"active":           forceRun || isWorking,
+		"active_tasks":     activeTasks,
+		"draining":         draining,
+		"active":           workerCount > 0 || activeTasks > 0,
 		"mode":             s.getWorkerMode(),
 	})
 }
@@ -345,10 +351,17 @@ func (s *Server) handleSetMaxWorkers(c *gin.Context) {
 	}
 
 	s.worker.SetMaxWorkers(req.MaxWorkers)
-	c.JSON(http.StatusOK, gin.H{
+	s.config.SetMaxWorkers(req.MaxWorkers)
+	warning := s.persistConfig()
+
+	resp := gin.H{
 		"message":     "最大Worker数量已更新",
 		"max_workers": req.MaxWorkers,
-	})
+	}
+	if warning != "" {
+		resp["warning"] = warning
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // handleGetDirectories 获取监控目录列表
@@ -376,11 +389,7 @@ func (s *Server) handleAddDirectory(c *gin.Context) {
 		return
 	}
 
-	var warning string
-	if err := s.config.Save(); err != nil {
-		warning = "目录已生效，但配置文件保存失败，重启容器后可能丢失: " + err.Error()
-		log.Printf("[API] 保存配置失败: %v", err)
-	}
+	warning := s.persistConfig()
 
 	// 使用应用程序生命周期 context，如果未设置则使用 Background
 	go func() {
@@ -422,11 +431,7 @@ func (s *Server) handleRemoveDirectory(c *gin.Context) {
 		return
 	}
 
-	var warning string
-	if err := s.config.Save(); err != nil {
-		warning = "目录已移除，但配置文件保存失败，重启容器后可能恢复: " + err.Error()
-		log.Printf("[API] 保存配置失败: %v", err)
-	}
+	warning := s.persistConfig()
 
 	resp := gin.H{
 		"message": "目录配对已删除",
@@ -539,6 +544,25 @@ func (s *Server) handleDeleteTrash(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "文件已删除"})
 }
 
+// handleRestoreTrash 恢复垃圾桶文件到原路径
+func (s *Server) handleRestoreTrash(c *gin.Context) {
+	var req struct {
+		Path string `json:"path" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+
+	if err := s.cleaner.RestoreTrashFile(req.Path); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "文件已恢复到原路径"})
+}
+
 // handleHealth 健康检查
 func (s *Server) handleHealth(c *gin.Context) {
 	// 检查数据库连接
@@ -579,11 +603,43 @@ func (s *Server) handleHealth(c *gin.Context) {
 func (s *Server) getWorkerMode() string {
 	if s.worker.GetForceRun() {
 		return "强制运行"
-	} else if s.worker.IsWorkingHours() {
-		return "自动运行（工作时间）"
-	} else {
-		return "休眠中"
 	}
+	if s.worker.IsWorkingHours() {
+		return "自动运行（工作时间）"
+	}
+	if s.worker.IsDraining() || s.worker.GetActiveTaskCount() > 0 {
+		return "非工作时间排空中"
+	}
+	return "休眠中"
+}
+
+func saveConfigHint(err error) string {
+	if errors.Is(err, syscall.EROFS) || errors.Is(err, syscall.EPERM) {
+		return err.Error() + "（当前配置文件可能是只读挂载，请将 docker-compose 的 config.yaml 挂载改为可写）"
+	}
+	if errors.Is(err, syscall.EBUSY) || strings.Contains(err.Error(), "device or resource busy") {
+		return err.Error() + "（当前配置文件是单文件挂载点，建议改为目录挂载或可写文件挂载）"
+	}
+	return err.Error()
+}
+
+func (s *Server) persistConfig() string {
+	// 修复：数据库为主存储且优先级最高，必须先保证DB写成功
+	// 否则重启后会从DB加载旧值，导致配置回退
+	dbErr := s.db.UpsertAppConfig(s.config.RuntimeKV())
+	if dbErr != nil {
+		log.Printf("[API] 保存数据库配置失败: %v", dbErr)
+		return "配置已在内存生效，但数据库保存失败（重启后会回退到数据库旧值）: " + dbErr.Error()
+	}
+
+	// DB 写入成功后才写 YAML（仅作备用）
+	fileErr := s.config.Save()
+	if fileErr != nil {
+		log.Printf("[API] 保存配置文件失败: %v", fileErr)
+		return "配置已写入数据库并生效，但回写YAML失败: " + saveConfigHint(fileErr)
+	}
+
+	return ""
 }
 
 // Start 启动Web服务器

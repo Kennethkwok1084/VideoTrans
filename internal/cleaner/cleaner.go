@@ -603,6 +603,73 @@ func (c *Cleaner) DeleteTrashFile(filename string) error {
 	return fmt.Errorf("文件不存在")
 }
 
+// RestoreTrashFile 将垃圾桶文件恢复到原路径（仅支持存在数据库关联的 soft_deleted 任务）
+func (c *Cleaner) RestoreTrashFile(trashPath string) error {
+	if strings.TrimSpace(trashPath) == "" {
+		return fmt.Errorf("垃圾桶路径不能为空")
+	}
+
+	cleanPath := filepath.Clean(trashPath)
+
+	allowed := false
+	for _, trashRoot := range c.getTrashRoots() {
+		root := filepath.Clean(trashRoot)
+		prefix := root + string(filepath.Separator)
+		if cleanPath == root || strings.HasPrefix(cleanPath, prefix) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("非法路径")
+	}
+
+	if _, err := os.Stat(cleanPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("文件不存在")
+		}
+		return fmt.Errorf("读取垃圾桶文件失败: %w", err)
+	}
+
+	task, err := c.db.GetSoftDeletedTaskByTrashPath(cleanPath)
+	if err != nil {
+		return fmt.Errorf("查询关联任务失败: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("未找到关联任务，无法恢复原路径")
+	}
+
+	targetPath := c.resolveSourcePath(task.SourcePath)
+	if strings.TrimSpace(targetPath) == "" {
+		return fmt.Errorf("无法解析原始路径")
+	}
+
+	if _, err := os.Stat(targetPath); err == nil {
+		return fmt.Errorf("原始路径已存在同名文件: %s", targetPath)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return fmt.Errorf("创建目标目录失败: %w", err)
+	}
+
+	if err := os.Rename(cleanPath, targetPath); err != nil {
+		if !isLinkError(err) {
+			return fmt.Errorf("恢复文件失败: %w", err)
+		}
+		if err := c.copyAndDelete(cleanPath, targetPath); err != nil {
+			return fmt.Errorf("跨分区恢复失败: %w", err)
+		}
+	}
+
+	note := fmt.Sprintf("手动恢复于 %s", time.Now().Format(time.RFC3339))
+	if err := c.db.MarkRestored(task.ID, note); err != nil {
+		return fmt.Errorf("更新任务状态失败: %w", err)
+	}
+
+	log.Printf("[Cleaner] 手动恢复垃圾桶文件: %s -> %s (task=%d)", cleanPath, targetPath, task.ID)
+	return nil
+}
+
 func (c *Cleaner) getTrashRoots() []string {
 	roots := c.config.GetTrashRoots()
 	if len(roots) == 0 {

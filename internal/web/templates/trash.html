@@ -124,6 +124,13 @@
     <script>
         let deleteTarget = null;
 
+        // HTML 转义函数，防止 XSS 注入
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
         // 格式化文件大小
         function formatSize(bytes) {
             if (bytes === 0) return '0 B';
@@ -200,8 +207,8 @@
                 tbody.innerHTML = data.files.map(file => `
                     <tr class="hover:bg-gray-50">
                         <td class="px-6 py-4">
-                            <div class="text-sm font-medium text-gray-900 max-w-md truncate" title="${file.name}">
-                                ${file.name}
+                            <div class="text-sm font-medium text-gray-900 max-w-md truncate" title="${escapeHtml(file.name)}">
+                                ${escapeHtml(file.name)}
                             </div>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
@@ -214,7 +221,11 @@
                             ${calculateDaysLeft(file.delete_time)}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                            <button onclick="showDeleteModal('${file.name}')" 
+                            <button onclick="restoreFile('${encodeURIComponent(file.path)}')" 
+                                    class="text-blue-600 hover:text-blue-900 mr-3">
+                                恢复
+                            </button>
+                            <button onclick="showDeleteModal('${encodeURIComponent(file.name)}')" 
                                     class="text-red-600 hover:text-red-900">
                                 永久删除
                             </button>
@@ -228,10 +239,35 @@
         }
 
         // 显示删除确认对话框
-        function showDeleteModal(filename) {
+        function showDeleteModal(encodedFilename) {
+            const filename = decodeURIComponent(encodedFilename);
             deleteTarget = filename;
             document.getElementById('deleteFileName').textContent = filename;
             document.getElementById('deleteModal').classList.remove('hidden');
+        }
+
+        // 恢复文件
+        async function restoreFile(encodedPath) {
+            const path = decodeURIComponent(encodedPath);
+            if (!confirm('确定要恢复该文件到原路径吗？')) return;
+
+            try {
+                const res = await fetch('/api/trash/restore', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path })
+                });
+
+                const data = await res.json();
+                if (res.ok) {
+                    alert('文件已恢复到原路径');
+                    loadTrashFiles();
+                } else {
+                    alert('恢复失败: ' + (data.error || '未知错误'));
+                }
+            } catch (err) {
+                alert('恢复失败: ' + err.message);
+            }
         }
 
         // 关闭删除确认对话框

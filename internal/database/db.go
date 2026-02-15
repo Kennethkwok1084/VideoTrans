@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -87,12 +88,72 @@ func (db *DB) createTables() error {
 		name TEXT PRIMARY KEY,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
+
+	CREATE TABLE IF NOT EXISTS app_config (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
 	`
 
 	if _, err := db.conn.Exec(schema); err != nil {
 		return err
 	}
 	return db.ensureColumns()
+}
+
+// GetAppConfig 读取数据库中的应用配置键值对
+func (db *DB) GetAppConfig() (map[string]string, error) {
+	rows, err := db.conn.Query(`SELECT key, value FROM app_config`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// UpsertAppConfig 批量写入应用配置键值对
+func (db *DB) UpsertAppConfig(values map[string]string) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO app_config(key, value, updated_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(key) DO UPDATE SET
+			value = excluded.value,
+			updated_at = CURRENT_TIMESTAMP
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		if _, err := stmt.Exec(k, values[k]); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (db *DB) ensureColumns() error {
@@ -618,6 +679,59 @@ func (db *DB) MarkSoftDeleted(id int64, trashPath string) error {
 func (db *DB) MarkHardDeleted(id int64) error {
 	query := `UPDATE tasks SET status = ? WHERE id = ?`
 	_, err := db.conn.Exec(query, StatusHardDeleted, id)
+	return err
+}
+
+// GetSoftDeletedTaskByTrashPath 按垃圾桶路径查询 soft_deleted 任务
+func (db *DB) GetSoftDeletedTaskByTrashPath(trashPath string) (*Task, error) {
+	query := `
+		SELECT id, source_path, source_mtime, source_size, status, retry_count,
+		       progress, output_size, repair_mode, created_at, completed_at, log,
+		       source_deleted_at, trash_path, cleanup_log,
+		       next_retry_at, last_error_category
+		FROM tasks
+		WHERE status = ? AND trash_path = ?
+		LIMIT 1
+	`
+
+	task := &Task{}
+	err := db.conn.QueryRow(query, StatusSoftDeleted, trashPath).Scan(
+		&task.ID,
+		&task.SourcePath,
+		&task.SourceMtime,
+		&task.SourceSize,
+		&task.Status,
+		&task.RetryCount,
+		&task.Progress,
+		&task.OutputSize,
+		&task.RepairMode,
+		&task.CreatedAt,
+		&task.CompletedAt,
+		&task.Log,
+		&task.SourceDeletedAt,
+		&task.TrashPath,
+		&task.CleanupLog,
+		&task.NextRetryAt,
+		&task.LastErrorCategory,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return task, nil
+}
+
+// MarkRestored 标记任务为已恢复（文件从垃圾桶恢复到原路径）
+func (db *DB) MarkRestored(id int64, note string) error {
+	query := `
+		UPDATE tasks
+		SET status = ?, trash_path = NULL, source_deleted_at = NULL, cleanup_log = ?
+		WHERE id = ? AND status = ?
+	`
+	_, err := db.conn.Exec(query, StatusCompleted, note, id, StatusSoftDeleted)
 	return err
 }
 

@@ -1,11 +1,15 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
@@ -139,7 +143,11 @@ func Load(configPath string) (*Config, error) {
 func (c *Config) Validate() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.validateLocked()
+}
 
+// validateLocked 内部验证函数（假定调用者已持有锁）
+func (c *Config) validateLocked() error {
 	// 验证时间窗口
 	if c.System.CronStart < 0 || c.System.CronStart > 23 {
 		return fmt.Errorf("cron_start 必须在 0-23 之间")
@@ -369,9 +377,194 @@ func (c *Config) Save() error {
 	}
 	if err := os.Rename(tmpPath, configPath); err != nil {
 		_ = os.Remove(tmpPath)
+		if isReplaceUnsupported(err) {
+			if writeErr := writeConfigInPlace(configPath, data); writeErr != nil {
+				return fmt.Errorf("替换配置文件失败(%v)，且原地写入也失败: %w", err, writeErr)
+			}
+			return nil
+		}
 		return fmt.Errorf("替换配置文件失败: %w", err)
 	}
 
+	return nil
+}
+
+func isReplaceUnsupported(err error) bool {
+	return errors.Is(err, syscall.EBUSY) ||
+		errors.Is(err, syscall.EXDEV) ||
+		errors.Is(err, syscall.EPERM)
+}
+
+func writeConfigInPlace(configPath string, data []byte) error {
+	f, err := os.OpenFile(configPath, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+// SetMaxWorkers 更新配置中的最大并发数（不自动落盘）。
+func (c *Config) SetMaxWorkers(count int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.System.MaxWorkers = count
+}
+
+// RuntimeKV 导出运行时可变配置（用于持久化到数据库）。
+func (c *Config) RuntimeKV() map[string]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	pairsData, _ := json.Marshal(c.Path.Pairs)
+	return map[string]string{
+		"system.cron_start":         strconv.Itoa(c.System.CronStart),
+		"system.cron_end":           strconv.Itoa(c.System.CronEnd),
+		"system.max_workers":        strconv.Itoa(c.System.MaxWorkers),
+		"system.scan_interval":      strconv.Itoa(c.System.ScanInterval),
+		"system.scheduler_interval": strconv.Itoa(c.System.SchedulerInterval),
+		"system.task_queue_size":    strconv.Itoa(c.System.TaskQueueSize),
+		"cleaning.cron":             c.Cleaning.Cron,
+		"path.pairs":                string(pairsData),
+	}
+}
+
+// ApplyRuntimeKV 应用数据库中的运行时配置覆盖值。
+// 修复：先验证所有字段，全部成功后才统一应用，避免部分提交。
+func (c *Config) ApplyRuntimeKV(values map[string]string) error {
+	// 阶段1：验证并解析所有值（不加锁，不修改配置）
+	type parsedValues struct {
+		cronStart         *int
+		cronEnd           *int
+		maxWorkers        *int
+		scanInterval      *int
+		schedulerInterval *int
+		taskQueueSize     *int
+		cleaningCron      *string
+		pathPairs         []InputOutputPair
+	}
+	parsed := parsedValues{}
+
+	if v, ok := values["system.cron_start"]; ok && strings.TrimSpace(v) != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("system.cron_start 无效: %w", err)
+		}
+		parsed.cronStart = &n
+	}
+	if v, ok := values["system.cron_end"]; ok && strings.TrimSpace(v) != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("system.cron_end 无效: %w", err)
+		}
+		parsed.cronEnd = &n
+	}
+	if v, ok := values["system.max_workers"]; ok && strings.TrimSpace(v) != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("system.max_workers 无效: %w", err)
+		}
+		parsed.maxWorkers = &n
+	}
+	if v, ok := values["system.scan_interval"]; ok && strings.TrimSpace(v) != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("system.scan_interval 无效: %w", err)
+		}
+		parsed.scanInterval = &n
+	}
+	if v, ok := values["system.scheduler_interval"]; ok && strings.TrimSpace(v) != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("system.scheduler_interval 无效: %w", err)
+		}
+		parsed.schedulerInterval = &n
+	}
+	if v, ok := values["system.task_queue_size"]; ok && strings.TrimSpace(v) != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("system.task_queue_size 无效: %w", err)
+		}
+		parsed.taskQueueSize = &n
+	}
+	if v, ok := values["cleaning.cron"]; ok && strings.TrimSpace(v) != "" {
+		s := strings.TrimSpace(v)
+		parsed.cleaningCron = &s
+	}
+	if v, ok := values["path.pairs"]; ok && strings.TrimSpace(v) != "" {
+		var pairs []InputOutputPair
+		if err := json.Unmarshal([]byte(v), &pairs); err != nil {
+			return fmt.Errorf("path.pairs 无效: %w", err)
+		}
+		parsed.pathPairs = pairs
+	}
+
+	// 阶段2：所有验证通过，加锁并统一应用
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// 失败回滚快照，确保 ApplyRuntimeKV 要么全部成功要么不生效
+	previous := Config{
+		System:    c.System,
+		Scheduler: c.Scheduler,
+		Retry:     c.Retry,
+		FFmpeg:    c.FFmpeg,
+		Cleaning:  c.Cleaning,
+		Log:       c.Log,
+		Path: PathConfig{
+			Input:     c.Path.Input,
+			Inputs:    append([]string(nil), c.Path.Inputs...),
+			Output:    c.Path.Output,
+			Pairs:     append([]InputOutputPair(nil), c.Path.Pairs...),
+			Trash:     c.Path.Trash,
+			Database:  c.Path.Database,
+			Templates: c.Path.Templates,
+		},
+	}
+
+	if parsed.cronStart != nil {
+		c.System.CronStart = *parsed.cronStart
+	}
+	if parsed.cronEnd != nil {
+		c.System.CronEnd = *parsed.cronEnd
+	}
+	if parsed.maxWorkers != nil {
+		c.System.MaxWorkers = *parsed.maxWorkers
+	}
+	if parsed.scanInterval != nil {
+		c.System.ScanInterval = *parsed.scanInterval
+	}
+	if parsed.schedulerInterval != nil {
+		c.System.SchedulerInterval = *parsed.schedulerInterval
+	}
+	if parsed.taskQueueSize != nil {
+		c.System.TaskQueueSize = *parsed.taskQueueSize
+	}
+	if parsed.cleaningCron != nil {
+		c.Cleaning.Cron = *parsed.cleaningCron
+	}
+	if parsed.pathPairs != nil {
+		c.Path.Pairs = parsed.pathPairs
+		if len(parsed.pathPairs) > 0 {
+			c.Path.Input = parsed.pathPairs[0].Input
+			c.Path.Output = parsed.pathPairs[0].Output
+		}
+	}
+
+	if err := c.validateLocked(); err != nil {
+		c.System = previous.System
+		c.Scheduler = previous.Scheduler
+		c.Retry = previous.Retry
+		c.FFmpeg = previous.FFmpeg
+		c.Cleaning = previous.Cleaning
+		c.Log = previous.Log
+		c.Path = previous.Path
+		return err
+	}
 	return nil
 }
 

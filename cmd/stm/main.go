@@ -40,6 +40,23 @@ func main() {
 	defer db.Close()
 	log.Println("[Main] 数据库初始化成功")
 
+	// 数据库配置覆盖 YAML（数据库为主，YAML 为启动默认）
+	if kv, err := db.GetAppConfig(); err != nil {
+		log.Printf("[Main] 读取数据库配置失败，继续使用YAML: %v", err)
+	} else if len(kv) > 0 {
+		if err := cfg.ApplyRuntimeKV(kv); err != nil {
+			log.Printf("[Main] 应用数据库配置失败，继续使用YAML: %v", err)
+		} else {
+			log.Printf("[Main] 已应用数据库配置覆盖（%d 项）", len(kv))
+		}
+	} else {
+		if err := db.UpsertAppConfig(cfg.RuntimeKV()); err != nil {
+			log.Printf("[Main] 初始化数据库配置失败（不影响运行）: %v", err)
+		} else {
+			log.Printf("[Main] 已将YAML配置初始化到数据库")
+		}
+	}
+
 	if count, err := db.ResetProcessingTasksToPending(); err != nil {
 		log.Printf("[Main] 恢复未完成任务失败: %v", err)
 	} else if count > 0 {
