@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // Register sqlite driver
 )
 
 // DB 数据库连接包装器
@@ -225,6 +225,7 @@ func (db *DB) ensureColumns() error {
 		`CREATE INDEX IF NOT EXISTS idx_status_source_deleted_at ON tasks(status, source_deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_status_completed_at_id ON tasks(status, completed_at, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_status_created_at ON tasks(status, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_trash_path ON tasks(trash_path)`,
 	}
 	for _, ddl := range indexDDL {
 		if _, err := db.conn.Exec(ddl); err != nil {
@@ -367,13 +368,13 @@ func (db *DB) UpdateTaskPath(id int64, newPath string) error {
 
 // GetPendingTasks 获取待处理任务（支持指数退避重试过滤）
 // 包括：1) status=pending 的任务；2) status=failed 但 next_retry_at 已到期的任务
-func (db *DB) GetPendingTasks(limit int) ([]*Task, error) {
+func (db *DB) GetPendingTasks(limit int, maxRetry int) ([]*Task, error) {
 	query := `
 		SELECT id, source_path, source_mtime, source_size, status, retry_count,
 		       progress, output_size, repair_mode, created_at, completed_at, log,
 		       next_retry_at, last_error_category
 		FROM tasks
-		WHERE retry_count < 3
+		WHERE retry_count < ?
 		  AND (
 		      (status = ? AND (next_retry_at IS NULL OR next_retry_at <= datetime('now')))
 		      OR (status = ? AND next_retry_at IS NOT NULL AND next_retry_at <= datetime('now'))
@@ -382,7 +383,7 @@ func (db *DB) GetPendingTasks(limit int) ([]*Task, error) {
 		LIMIT ?
 	`
 
-	rows, err := db.conn.Query(query, StatusPending, StatusFailed, limit)
+	rows, err := db.conn.Query(query, maxRetry, StatusPending, StatusFailed, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -559,7 +560,7 @@ func (db *DB) GetAllTasks(status string, limit, offset int) ([]*Task, error) {
 		query = `
 			SELECT id, source_path, source_mtime, source_size, status, retry_count,
 			       progress, output_size, repair_mode, created_at, completed_at, log,
-			       cleanup_log
+			       source_deleted_at, trash_path, cleanup_log, next_retry_at, last_error_category
 			FROM tasks
 			WHERE status = ?
 			ORDER BY created_at DESC
@@ -570,7 +571,7 @@ func (db *DB) GetAllTasks(status string, limit, offset int) ([]*Task, error) {
 		query = `
 			SELECT id, source_path, source_mtime, source_size, status, retry_count,
 			       progress, output_size, repair_mode, created_at, completed_at, log,
-			       cleanup_log
+			       source_deleted_at, trash_path, cleanup_log, next_retry_at, last_error_category
 			FROM tasks
 			ORDER BY created_at DESC
 			LIMIT ? OFFSET ?
@@ -600,7 +601,11 @@ func (db *DB) GetAllTasks(status string, limit, offset int) ([]*Task, error) {
 			&task.CreatedAt,
 			&task.CompletedAt,
 			&task.Log,
+			&task.SourceDeletedAt,
+			&task.TrashPath,
 			&task.CleanupLog,
+			&task.NextRetryAt,
+			&task.LastErrorCategory,
 		)
 		if err != nil {
 			return nil, err
@@ -611,7 +616,7 @@ func (db *DB) GetAllTasks(status string, limit, offset int) ([]*Task, error) {
 	return tasks, rows.Err()
 }
 
-// GetScanErrorTasks 获取输出校验/扫描发现异常的任务
+// GetScanErrorTasks gets tasks that have output validation/scan errors.
 func (db *DB) GetScanErrorTasks(limit, offset int) ([]*Task, error) {
 	query := `
 		SELECT id, source_path, source_mtime, source_size, status, retry_count,
@@ -859,7 +864,7 @@ func (db *DB) GetSoftDeletedOldTasks(cutoffTime time.Time) ([]*Task, error) {
 	return tasks, rows.Err()
 }
 
-// GetBatchTasksCompleted 批量获取完成任务（支持 keyset 游标分页）
+// GetBatchTasksCompleted gets a batch of completed tasks using keyset pagination.
 func (db *DB) GetBatchTasksCompleted(since time.Time, lastID int64, upperBound time.Time, limit int) ([]*Task, error) {
 	query := `
 		SELECT id, source_path, source_mtime, source_size, status, retry_count,
@@ -959,7 +964,7 @@ func (db *DB) migratePhase3HistoricalData() error {
 // ClaimPendingTasks 原子性地 claim 待处理任务（Phase 4: 从 pending 直接变为 processing）
 // 在单个事务中完成"选取 + 状态迁移"，避免重复调度
 // Phase 4: 支持指数退避，仅 claim next_retry_at <= now 的任务
-func (db *DB) ClaimPendingTasks(limit int) ([]*Task, error) {
+func (db *DB) ClaimPendingTasks(limit int, maxRetry int) ([]*Task, error) {
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("开始事务失败: %w", err)
@@ -974,7 +979,7 @@ func (db *DB) ClaimPendingTasks(limit int) ([]*Task, error) {
 		       source_deleted_at, trash_path, cleanup_log,
 		       next_retry_at, last_error_category
 		FROM tasks
-		WHERE retry_count < 3
+		WHERE retry_count < ?
 		  AND (
 		      (status = ? AND (next_retry_at IS NULL OR next_retry_at <= datetime('now')))
 		      OR (status = ? AND next_retry_at IS NOT NULL AND next_retry_at <= datetime('now'))
@@ -983,7 +988,7 @@ func (db *DB) ClaimPendingTasks(limit int) ([]*Task, error) {
 		LIMIT ?
 	`
 
-	rows, err := tx.Query(selectQuery, StatusPending, StatusFailed, limit)
+	rows, err := tx.Query(selectQuery, maxRetry, StatusPending, StatusFailed, limit)
 	if err != nil {
 		return nil, fmt.Errorf("查询待处理任务失败: %w", err)
 	}

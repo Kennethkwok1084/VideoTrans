@@ -21,7 +21,7 @@ func TestScanner_Concurrency_Real(t *testing.T) {
 	// 这确保了 Scanner 处于锁定状态
 	scanLocked := make(chan struct{})
 	releaseScan := make(chan struct{})
-	
+
 	// 使用 sync.Once 确保 close 操作只执行一次，防止 panic
 	var onceRelease sync.Once
 
@@ -85,7 +85,7 @@ func TestScanner_Concurrency_Real(t *testing.T) {
 
 	// 等待主扫描结束，防止 goroutine 泄漏干扰后续测试
 	mainScanWg.Wait()
-	
+
 	// 验证主扫描成功（它应该正常完成，不应该被并发请求影响）
 	if mainScanErr != nil {
 		t.Errorf("Main scan failed: %v", mainScanErr)
@@ -105,7 +105,7 @@ func TestScanner_Verify_PartialFailure(t *testing.T) {
 	if err := os.WriteFile(testFile, []byte("content"), 0644); err != nil {
 		t.Fatalf("创建测试文件失败: %v", err)
 	}
-	
+
 	task := &database.Task{
 		SourcePath:  testFile,
 		SourceMtime: time.Now(),
@@ -117,29 +117,29 @@ func TestScanner_Verify_PartialFailure(t *testing.T) {
 	if err := db.UpdateTaskStatus(task.ID, database.StatusCompleted, ""); err != nil {
 		t.Fatalf("更新任务状态失败: %v", err)
 	}
-	
+
 	// 设置初始水位为 1 小时前
 	initialWatermark := time.Now().Add(-1 * time.Hour)
 	scanner.lastVerifyTime = initialWatermark
-	
+
 	// 更新任务完成时间为现在
 	if err := db.UpdateTaskStatus(task.ID, database.StatusCompleted, ""); err != nil { // update completed_at to now
 		t.Fatalf("再次更新任务状态失败: %v", err)
 	}
-	
+
 	// 2. 模拟系统错误：删除源文件目录，导致 resolveOutputPath 或 os.Stat 失败
 	// 但我们已经在 setupTestScanner 中创建了目录。
 	// 让我们通过修改 config 使得 resolveOutputPath 失败
 	// 或者直接删除 inputDir
 	// 注意：Delete inputDir might cause Scan itself to fail before Verify.
 	// We want Verify to fail. Verify calls resolveOutputPath which uses config.
-	
+
 	// 让我们尝试构造一种情况：os.Stat 失败（权限拒绝）。
 	// 但在测试环境中 chmod 可能不生效（取决于用户）。
 	// 另一种方法：让 resolveOutputPath 失败。
 	// 我们可以清空 Config.Pairs，这样 resolveOutputPath 将返回 false。
 	scanner.config.Path.Pairs = []config.InputOutputPair{}
-	
+
 	// 3. 执行 Scan
 	if err := scanner.Scan(context.Background()); err != nil {
 		// Scan 可能会因为 config 为空而报错，也可能只记录日志
@@ -147,12 +147,12 @@ func TestScanner_Verify_PartialFailure(t *testing.T) {
 		// 如果 Scan 返回错误，也是预期的，但我们要检查水位
 		t.Logf("Scan returned error (expected): %v", err)
 	}
-	
+
 	// 4. 检查水位是否推进
 	// 因为 resolveOutputPath 失败，verifyCompletedOutputs 应该返回 error 或不更新 cursorTime
 	// 我们的逻辑是：如果 resolveOutputPath 失败，log error 并 return cursorTime (初始值)。
 	// 所以 scanner.lastVerifyTime 应该保持不变（或者不应该推进到 task.CompletedAt）。
-	
+
 	if scanner.lastVerifyTime.After(initialWatermark) {
 		t.Errorf("Watermark advanced despite failure! Initial: %v, Current: %v", initialWatermark, scanner.lastVerifyTime)
 	}
@@ -197,6 +197,12 @@ func setupTestScanner(t *testing.T) (*Scanner, *database.DB, string) {
 }
 
 func TestShouldSkipDir(t *testing.T) {
+	scanner, db, _ := setupTestScanner(t)
+	defer db.Close()
+
+	// 设置默认跳过目录
+	scanner.config.System.SkipDirs = []string{".stm_trash", "@eaDir", "#recycle", ".DS_Store"}
+
 	tests := []struct {
 		name string
 		want bool
@@ -211,7 +217,7 @@ func TestShouldSkipDir(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldSkipDir(tt.name); got != tt.want {
+			if got := scanner.shouldSkipDir(tt.name); got != tt.want {
 				t.Errorf("shouldSkipDir(%s) = %v, want %v", tt.name, got, tt.want)
 			}
 		})
@@ -219,6 +225,13 @@ func TestShouldSkipDir(t *testing.T) {
 }
 
 func TestShouldSkipFile(t *testing.T) {
+	scanner, db, _ := setupTestScanner(t)
+	defer db.Close()
+
+	// 设置默认跳过规则
+	scanner.config.System.SkipFilePrefixes = []string{"SYNOPHOTO_", "."}
+	scanner.config.System.SkipFileSuffixes = []string{".tmp", ".part", ".lock"}
+
 	tests := []struct {
 		name string
 		want bool
@@ -235,7 +248,7 @@ func TestShouldSkipFile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldSkipFile(tt.name); got != tt.want {
+			if got := scanner.shouldSkipFile(tt.name); got != tt.want {
 				t.Errorf("shouldSkipFile(%s) = %v, want %v", tt.name, got, tt.want)
 			}
 		})

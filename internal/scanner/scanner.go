@@ -24,12 +24,12 @@ var ErrVerifyAborted = fmt.Errorf("校验过程被中断")
 
 // Scanner 目录扫描器
 type Scanner struct {
-	config *config.Config
-	db     *database.DB
+	config         *config.Config
+	db             *database.DB
 	lastVerifyTime time.Time
 	mu             sync.Mutex
 	running        bool
-	
+
 	// 测试钩子
 	beforeScan func()
 }
@@ -178,7 +178,7 @@ func (s *Scanner) scanDirectory(ctx context.Context, inputDir string, outputDir 
 		// 跳过目录
 		if d.IsDir() {
 			// 检查是否需要跳过此目录
-			if shouldSkipDir(d.Name()) {
+			if s.shouldSkipDir(d.Name()) {
 				log.Printf("[Scanner] 跳过系统目录: %s", path)
 				return filepath.SkipDir
 			}
@@ -186,7 +186,7 @@ func (s *Scanner) scanDirectory(ctx context.Context, inputDir string, outputDir 
 		}
 
 		// 文件过滤
-		if shouldSkipFile(d.Name()) {
+		if s.shouldSkipFile(d.Name()) {
 			return nil
 		}
 
@@ -305,44 +305,28 @@ func (s *Scanner) processFile(fullPath, relPath, outputDir string, mtime time.Ti
 	return "skip"
 }
 
-// shouldSkipDir 检查是否应跳过该目录
-func shouldSkipDir(name string) bool {
-	skipDirs := []string{
-		".stm_trash", // 垃圾桶
-		"@eaDir",     // 群晖索引
-		"#recycle",   // 群晖回收站
-		".DS_Store",  // macOS
-	}
-
-	for _, dir := range skipDirs {
+// shouldSkipDir checks if a directory should be skipped.
+func (s *Scanner) shouldSkipDir(name string) bool {
+	for _, dir := range s.config.System.SkipDirs {
 		if name == dir {
 			return true
 		}
 	}
-
 	return false
 }
 
-// shouldSkipFile 检查是否应跳过该文件（支持通配符）
-func shouldSkipFile(name string) bool {
-	// 群晖缩略图/视频
-	if strings.HasPrefix(name, "SYNOPHOTO_") {
-		return true
+// shouldSkipFile checks if a file should be skipped.
+func (s *Scanner) shouldSkipFile(name string) bool {
+	for _, prefix := range s.config.System.SkipFilePrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
 	}
 
-	// 隐藏文件
-	if strings.HasPrefix(name, ".") {
-		return true
-	}
-
-	// 临时文件
-	if strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".part") {
-		return true
-	}
-
-	// 锁文件
-	if strings.HasSuffix(name, ".lock") {
-		return true
+	for _, suffix := range s.config.System.SkipFileSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
 	}
 
 	return false

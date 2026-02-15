@@ -105,7 +105,7 @@ func (w *Worker) Run(ctx context.Context) {
 	log.Println("[Worker] Worker守护进程已退出")
 }
 
-// isWorkingHours 检查是否在工作时间窗口内
+// IsWorkingHours checks if the current time is within the configured working hours.
 func (w *Worker) IsWorkingHours() bool {
 	if w.config == nil {
 		return false
@@ -124,9 +124,8 @@ func (w *Worker) IsWorkingHours() bool {
 	// 处理跨天情况（如 22:00 - 06:00）
 	if start < end {
 		return hour >= start && hour < end
-	} else {
-		return hour >= start || hour < end
 	}
+	return hour >= start || hour < end
 }
 
 // GetForceRun 获取强制运行状态
@@ -140,6 +139,7 @@ func (w *Worker) GetForceRun() bool {
 func (w *Worker) SetForceRun(force bool) {
 	w.mu.Lock()
 	w.forceRun = force
+	mainCtx := w.mainCtx
 	w.mu.Unlock()
 
 	if force {
@@ -149,16 +149,18 @@ func (w *Worker) SetForceRun(force bool) {
 	}
 
 	// 立即触发 Worker Pool 调整
-	if w.mainCtx != nil {
+	if mainCtx != nil {
 		go func() {
 			targetWorkers := w.getTargetWorkerCount()
 			currentWorkers := w.GetWorkerCount()
 
 			if targetWorkers != currentWorkers {
 				log.Printf("[WorkerPool] 强制模式变更：调整Worker数量 %d -> %d", currentWorkers, targetWorkers)
-				w.adjustWorkerPool(w.mainCtx, targetWorkers)
+				w.adjustWorkerPool(mainCtx, targetWorkers)
 			}
 		}()
+	} else {
+		log.Println("[Worker] 警告：mainCtx 未设置，无法立即调整 Worker Pool")
 	}
 }
 
@@ -210,7 +212,9 @@ func (w *Worker) SetMaxWorkers(count int) {
 	log.Printf("[Worker] 最大Worker数量已调整为: %d", count)
 
 	if mainCtx != nil {
-		go w.adjustWorkerPool(mainCtx, w.getTargetWorkerCount())
+		go w.adjustWorkerPool(mainCtx, count)
+	} else {
+		log.Println("[Worker] 警告：mainCtx 未设置，无法立即调整 Worker Pool")
 	}
 }
 
@@ -284,19 +288,19 @@ func (w *Worker) scheduler(ctx context.Context) {
 			if limit <= 0 {
 				continue
 			}
-			
+
 			var tasks []*database.Task
 			var err error
-			
+
 			// Phase 4: 支持原子 Claim 调度
 			if w.config != nil && w.config.Scheduler.AtomicClaim {
 				// 使用原子 Claim 方式（pending -> processing 在 DB 层完成）
-				tasks, err = w.db.ClaimPendingTasks(limit)
+				tasks, err = w.db.ClaimPendingTasks(limit, w.config.System.MaxRetry)
 			} else {
 				// 传统方式（pending -> processing 在 Worker 处理时完成）
-				tasks, err = w.db.GetPendingTasks(limit)
+				tasks, err = w.db.GetPendingTasks(limit, w.config.System.MaxRetry)
 			}
-			
+
 			if err != nil {
 				log.Printf("[Scheduler] 获取待处理任务失败: %v", err)
 				continue
@@ -575,11 +579,12 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 							_ = w.db.UpdateTaskRepairMode(task.ID, "")
 							_ = w.db.UpdateTaskStatus(task.ID, database.StatusIrrecoverable, "文件损坏不可恢复")
 						}
-					} else if w.isRetryable(category, transient) && nextRetry < 3 {
+					} else if w.isRetryable(category, transient) && nextRetry < w.config.System.MaxRetry {
+
 						// Phase 4: 支持指数退避重试
 						if w.config != nil && w.config.Retry.BackoffEnabled {
 							// 使用指数退避 + 抖动
-							baseDelay := 60 // 默认 60 秒
+							baseDelay := 60  // 默认 60 秒
 							maxDelay := 3600 // 默认 1 小时
 							if w.config.Retry.BaseDelaySeconds > 0 {
 								baseDelay = w.config.Retry.BaseDelaySeconds
@@ -606,7 +611,7 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 							}
 
 							nextRetryAt := time.Now().Add(time.Duration(finalDelay) * time.Second)
-							logMsg := fmt.Sprintf("自动重试(%d/%d): %s\n将在 %s 后重试", nextRetry, 3, getCategoryDescription(category), time.Duration(finalDelay)*time.Second)
+							logMsg := fmt.Sprintf("自动重试(%d/%d): %s\n将在 %s 后重试", nextRetry, w.config.System.MaxRetry, getCategoryDescription(category), time.Duration(finalDelay)*time.Second)
 							if category != "" {
 								logMsg += fmt.Sprintf("\n%s", errMsg)
 							}
@@ -784,7 +789,7 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 	ffCtx, cancel := context.WithTimeout(ctx, maxDuration)
 	defer cancel()
 
-	cmd := exec.CommandContext(ffCtx, "ffmpeg", args...)
+	cmd := exec.CommandContext(ffCtx, w.config.FFmpeg.FFmpegPath, args...)
 
 	// 获取stdout和stderr
 	stdout, err := cmd.StdoutPipe()
@@ -804,7 +809,9 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 
 	// 收集stderr日志
 	var stderrBuf strings.Builder
+	stderrDone := make(chan struct{})
 	go func() {
+		defer close(stderrDone)
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			stderrBuf.WriteString(scanner.Text() + "\n")
@@ -844,7 +851,12 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 	}()
 
 	// 等待命令完成
-	if err := cmd.Wait(); err != nil {
+	// 先等待 stdout/stderr 读取完成（Go 文档要求在所有管道读取完成后才能调用 Wait）
+	<-progressDone
+	<-stderrDone
+	waitErr := cmd.Wait()
+
+	if waitErr != nil {
 		stallReason := ""
 		select {
 		case stallReason = <-stallReasonCh:
@@ -852,12 +864,12 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		}
 
 		if stallReason != "" {
-			return fmt.Errorf("%s: %w\n日志:\n%s", stallReason, err, stderrBuf.String())
+			return fmt.Errorf("%s: %w\n日志:\n%s", stallReason, waitErr, stderrBuf.String())
 		}
 		if errors.Is(ffCtx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("FFmpeg超时(%s): %w\n日志:\n%s", maxDuration, err, stderrBuf.String())
+			return fmt.Errorf("FFmpeg超时(%s): %w\n日志:\n%s", maxDuration, waitErr, stderrBuf.String())
 		}
-		return fmt.Errorf("FFmpeg执行失败: %w\n日志:\n%s", err, stderrBuf.String())
+		return fmt.Errorf("FFmpeg执行失败: %w\n日志:\n%s", waitErr, stderrBuf.String())
 	}
 
 	if w.config.FFmpeg.StrictCheck {
@@ -895,7 +907,7 @@ func (w *Worker) getDuration(path string) (float64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffprobe",
+	cmd := exec.CommandContext(ctx, w.config.FFmpeg.FFprobePath,
 		"-v", "error",
 		"-show_entries", "format=duration",
 		"-of", "default=noprint_wrappers=1:nokey=1",
@@ -1050,12 +1062,12 @@ func classifyError(errMsg string) (string, bool, bool) {
 	if strings.Contains(errMsg, "进度超过") || strings.Contains(errMsg, "FFmpeg超时") || strings.Contains(errMsg, "ffprobe超时") {
 		return "timeout", true, false
 	}
-	
+
 	// output_error - 输出文件验证失败（可重试，可能是文件损坏）
 	if strings.Contains(errMsg, "输出文件验证失败") {
 		return "output_error", true, true
 	}
-	
+
 	// io_error - IO/挂载盘问题（可重试）
 	if strings.Contains(lower, "input/output error") ||
 		strings.Contains(lower, "i/o error") ||
@@ -1068,12 +1080,12 @@ func classifyError(errMsg string) (string, bool, bool) {
 		strings.Contains(lower, "broken pipe") {
 		return "io_error", true, false
 	}
-	
+
 	// disk_space - 磁盘空间不足（不可重试）
 	if strings.Contains(errMsg, "磁盘空间") {
 		return "disk_space", false, false
 	}
-	
+
 	// invalid_data - 无效数据/文件损坏（不可重试，但可能触发修复模式）
 	if strings.Contains(errMsg, "文件检查失败") ||
 		strings.Contains(errMsg, "文件损坏") ||

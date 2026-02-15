@@ -30,8 +30,8 @@ FROM jrottenberg/ffmpeg:6.1-alpine
 # 配置国内镜像源
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
-# 安装时区数据
-RUN apk add --no-cache tzdata
+# 安装时区数据和 wget（健康检查需要）
+RUN apk add --no-cache tzdata wget
 
 # 创建应用目录
 WORKDIR /app
@@ -47,6 +47,14 @@ COPY --from=builder /build/internal/web/templates /app/templates
 
 # 创建数据目录
 RUN mkdir -p /data /input /output
+
+# 创建非 root 用户用于运行应用
+RUN addgroup -g 1000 stm && \
+    adduser -D -u 1000 -G stm stm && \
+    chown -R stm:stm /app /data /input /output
+
+# 切换到非 root 用户
+USER stm
 
 # 暴露 Web 端口
 EXPOSE 8080

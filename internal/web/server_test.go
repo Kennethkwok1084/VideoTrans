@@ -84,7 +84,7 @@ func TestHandleTriggerScan_Conflict(t *testing.T) {
 			t.Errorf("Expected 409 Conflict, got %d", w.Code)
 		}
 	})
-	
+
 	// Case 3: 其他错误
 	t.Run("Other Error", func(t *testing.T) {
 		expectedErr := errors.New("db error")

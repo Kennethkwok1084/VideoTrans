@@ -7,6 +7,10 @@ system:
   task_queue_size: 10  # 任务队列容量
   min_disk_space_gb: 5  # 最小磁盘空间要求（GB）
 
+# Web API 配置
+web:
+  api_key: ""  # API 密钥（为空则禁用认证，生产环境务必设置）
+
 scheduler:
   atomic_claim: true  # 启用原子 Claim 调度（Phase 4 优化）
 

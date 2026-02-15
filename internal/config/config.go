@@ -20,6 +20,7 @@ type Config struct {
 	mu         sync.RWMutex    `yaml:"-"`
 	ConfigPath string          `yaml:"-"`
 	System     SystemConfig    `yaml:"system"`
+	Web        WebConfig       `yaml:"web"`
 	Scheduler  SchedulerConfig `yaml:"scheduler"`
 	Retry      RetryConfig     `yaml:"retry"`
 	Path       PathConfig      `yaml:"path"`
@@ -30,13 +31,22 @@ type Config struct {
 
 // SystemConfig 系统配置
 type SystemConfig struct {
-	CronStart         int `yaml:"cron_start"`         // 工作开始时间（小时）
-	CronEnd           int `yaml:"cron_end"`           // 工作结束时间（小时）
-	MaxWorkers        int `yaml:"max_workers"`        // 最大并发数
-	ScanInterval      int `yaml:"scan_interval"`      // 扫描间隔（分钟）
-	SchedulerInterval int `yaml:"scheduler_interval"` // 调度器检查间隔（秒）
-	TaskQueueSize     int `yaml:"task_queue_size"`    // 任务队列容量
-	MinDiskSpaceGB    int `yaml:"min_disk_space_gb"`  // 最小磁盘空间要求（GB）
+	CronStart         int      `yaml:"cron_start"`         // 工作开始时间（小时）
+	CronEnd           int      `yaml:"cron_end"`           // 工作结束时间（小时）
+	MaxWorkers        int      `yaml:"max_workers"`        // 最大并发数
+	ScanInterval      int      `yaml:"scan_interval"`      // 扫描间隔（分钟）
+	SchedulerInterval int      `yaml:"scheduler_interval"` // 调度器检查间隔（秒）
+	TaskQueueSize     int      `yaml:"task_queue_size"`    // Task queue capacity
+	MaxRetry          int      `yaml:"max_retry"`          // Max retry count for failed tasks
+	MinDiskSpaceGB    int      `yaml:"min_disk_space_gb"`  // 最小磁盘空间要求（GB）
+	SkipDirs          []string `yaml:"skip_dirs"`
+	SkipFilePrefixes  []string `yaml:"skip_file_prefixes"`
+	SkipFileSuffixes  []string `yaml:"skip_file_suffixes"`
+}
+
+// WebConfig Web API 配置
+type WebConfig struct {
+	APIKey string `yaml:"api_key"` // API 密钥（为空则禁用认证）
 }
 
 // SchedulerConfig 调度器配置
@@ -71,27 +81,41 @@ type InputOutputPair struct {
 
 // FFmpegConfig FFmpeg配置
 type FFmpegConfig struct {
-	Codec                 string   `yaml:"codec"`
-	Preset                string   `yaml:"preset"`
-	CRF                   int      `yaml:"crf"`
-	Audio                 string   `yaml:"audio"`
-	AudioBitrate          string   `yaml:"audio_bitrate"`
-	OutputExtension       string   `yaml:"output_extension"`
-	VerifyDecodeSeconds   int      `yaml:"verify_decode_seconds"`
-	VerifyTailSeekSeconds int      `yaml:"verify_tail_seek_seconds"`
-	DiscardCorrupt        bool     `yaml:"discard_corrupt"`
-	CorruptStrategy       string   `yaml:"corrupt_strategy"`
-	CorruptProbeSeconds   int      `yaml:"corrupt_probe_seconds"`
-	CorruptErrorThreshold int      `yaml:"corrupt_error_threshold"`
-	OutputFPS             int      `yaml:"output_fps"`
-	Extensions            []string `yaml:"extensions"`
-	ExcludePatterns       []string `yaml:"exclude_patterns"`
-	StrictCheck           bool     `yaml:"strict_check"` // 是否启用严格文件检查（检测损坏文件）
-	ProbeTimeoutSeconds   int      `yaml:"probe_timeout_seconds"`
-	ProgressStallMinutes  int      `yaml:"progress_stall_minutes"`
-	MaxDurationHours      int      `yaml:"max_duration_hours"`
-	DurationFactor        float64  `yaml:"duration_factor"`
-	DurationExtraMinutes  int      `yaml:"duration_extra_minutes"`
+	Codec           string `yaml:"codec"`
+	Preset          string `yaml:"preset"`
+	CRF             int    `yaml:"crf"`
+	Audio           string `yaml:"audio"`
+	AudioBitrate    string `yaml:"audio_bitrate"`
+	OutputExtension string `yaml:"output_extension"`
+	// VerifyDecodeSeconds is the number of seconds to decode from the beginning of the video to verify it's not corrupt.
+	VerifyDecodeSeconds int `yaml:"verify_decode_seconds"`
+	// VerifyTailSeekSeconds is the number of seconds to seek from the end of the video to verify it's not corrupt.
+	VerifyTailSeekSeconds int  `yaml:"verify_tail_seek_seconds"`
+	DiscardCorrupt        bool `yaml:"discard_corrupt"`
+	// CorruptStrategy is what to do with corrupt files (e.g. "auto", "discard", "cfr").
+	CorruptStrategy string `yaml:"corrupt_strategy"`
+	// CorruptProbeSeconds is the number of seconds to probe a file to determine if it is corrupt.
+	CorruptProbeSeconds int `yaml:"corrupt_probe_seconds"`
+	// CorruptErrorThreshold is the number of errors to tolerate before marking a file as corrupt.
+	CorruptErrorThreshold int `yaml:"corrupt_error_threshold"`
+	// OutputFPS is the frames per second of the output video.
+	OutputFPS       int      `yaml:"output_fps"`
+	Extensions      []string `yaml:"extensions"`
+	ExcludePatterns []string `yaml:"exclude_patterns"`
+	// StrictCheck enables strict verification of video files to detect corruption. Defaults to true.
+	StrictCheck bool `yaml:"strict_check"`
+	// ProbeTimeoutSeconds is the timeout for probing a file.
+	ProbeTimeoutSeconds int `yaml:"probe_timeout_seconds"`
+	// ProgressStallMinutes is the number of minutes without progress to consider a task stalled.
+	ProgressStallMinutes int `yaml:"progress_stall_minutes"`
+	// MaxDurationHours is the maximum duration of a video to transcode.
+	MaxDurationHours int `yaml:"max_duration_hours"`
+	// DurationFactor is a factor to multiply the video duration by to get the max allowed transcoding time.
+	DurationFactor float64 `yaml:"duration_factor"`
+	// DurationExtraMinutes is extra minutes to add to the max allowed transcoding time.
+	DurationExtraMinutes int    `yaml:"duration_extra_minutes"`
+	FFmpegPath           string `yaml:"ffmpeg_path"`
+	FFprobePath          string `yaml:"ffprobe_path"`
 }
 
 // CleaningConfig 清理配置
@@ -128,13 +152,13 @@ func Load(configPath string) (*Config, error) {
 	}
 	cfg.ConfigPath = configPath
 
+	// 先应用环境变量覆盖，再统一验证
+	cfg.applyEnvOverrides()
+
 	// 验证配置
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("配置验证失败: %w", err)
 	}
-
-	// 处理环境变量覆盖
-	cfg.applyEnvOverrides()
 
 	return &cfg, nil
 }
@@ -171,11 +195,23 @@ func (c *Config) validateLocked() error {
 	if c.System.SchedulerInterval == 0 {
 		c.System.SchedulerInterval = 10 // 默认10秒
 	}
-	if c.System.TaskQueueSize == 0 {
-		c.System.TaskQueueSize = 10 // 默认队列容量10
+	if c.System.TaskQueueSize <= 0 {
+		c.System.TaskQueueSize = 100
+	}
+	if c.System.MaxRetry <= 0 {
+		c.System.MaxRetry = 3
 	}
 	if c.System.MinDiskSpaceGB == 0 {
 		c.System.MinDiskSpaceGB = 5 // 默认至少5GB空闲
+	}
+	if len(c.System.SkipDirs) == 0 {
+		c.System.SkipDirs = []string{".stm_trash", "@eaDir", "#recycle", ".DS_Store"}
+	}
+	if len(c.System.SkipFilePrefixes) == 0 {
+		c.System.SkipFilePrefixes = []string{"SYNOPHOTO_", "."}
+	}
+	if len(c.System.SkipFileSuffixes) == 0 {
+		c.System.SkipFileSuffixes = []string{".tmp", ".part", ".lock"}
 	}
 
 	// 验证路径
@@ -247,10 +283,13 @@ func (c *Config) validateLocked() error {
 		}
 	}
 
-	// 设置 FFmpeg 默认值
-	if !c.FFmpeg.StrictCheck {
-		// 默认不启用（已废弃，现在默认启用）
-		// 保持向后兼容，如果配置文件中未指定，默认为 true
+	// StrictCheck defaults are handled by YAML unmarshalling (zero value = false).
+	// No forced override — users can explicitly set strict_check: false.
+	if c.FFmpeg.FFmpegPath == "" {
+		c.FFmpeg.FFmpegPath = "ffmpeg"
+	}
+	if c.FFmpeg.FFprobePath == "" {
+		c.FFmpeg.FFprobePath = "ffprobe"
 	}
 
 	if c.FFmpeg.ProbeTimeoutSeconds < 0 {
@@ -325,8 +364,14 @@ func (c *Config) validateLocked() error {
 
 // applyEnvOverrides 应用环境变量覆盖
 func (c *Config) applyEnvOverrides() {
+	if val := os.Getenv("STM_API_KEY"); val != "" {
+		c.Web.APIKey = val
+	}
+
 	if val := os.Getenv("STM_MAX_WORKERS"); val != "" {
-		fmt.Sscanf(val, "%d", &c.System.MaxWorkers)
+		if i, err := strconv.Atoi(val); err == nil {
+			c.System.MaxWorkers = i
+		}
 	}
 	if val := os.Getenv("STM_INPUT_PATH"); val != "" {
 		c.Path.Input = val

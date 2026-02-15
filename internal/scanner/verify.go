@@ -164,7 +164,7 @@ func (s *Scanner) verifyCompletedOutputs(ctx context.Context, since time.Time) (
 
 		Verified:
 			checked++
-			
+
 			// 成功处理完该任务，更新游标
 			if task.CompletedAt != nil {
 				cursorTime = *task.CompletedAt

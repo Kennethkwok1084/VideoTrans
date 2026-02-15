@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"log"
 	"net/http"
@@ -93,10 +94,42 @@ func (s *Server) SetContext(ctx context.Context) {
 	s.ctx = ctx
 }
 
+// apiKeyAuth API 密钥认证中间件
+func (s *Server) apiKeyAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 如果未配置 API Key，则跳过认证
+		apiKey := s.config.Web.APIKey
+		if apiKey == "" {
+			c.Next()
+			return
+		}
+
+		// 从请求头获取 API Key
+		requestKey := c.GetHeader("X-API-Key")
+		if requestKey == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "缺少 X-API-Key 请求头"})
+			c.Abort()
+			return
+		}
+
+		// 验证 API Key
+		if subtle.ConstantTimeCompare([]byte(requestKey), []byte(apiKey)) != 1 {
+
+			log.Printf("[API Security] 非法访问尝试，来自: %s", c.ClientIP())
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "无效的 API Key"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
 // setupRoutes 设置路由
 func (s *Server) setupRoutes() {
-	// API路由
+	// API路由（需要认证）
 	api := s.router.Group("/api")
+	api.Use(s.apiKeyAuth()) // 为所有 API 添加认证中间件
 	{
 		api.GET("/stats", s.handleGetStats)
 		api.GET("/tasks", s.handleGetTasks)
@@ -132,7 +165,8 @@ func (s *Server) setupRoutes() {
 func (s *Server) handleGetStats(c *gin.Context) {
 	stats, err := s.db.GetStats()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API] Error getting stats: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get stats"})
 		return
 	}
 
@@ -209,7 +243,8 @@ func (s *Server) handleGetTasks(c *gin.Context) {
 		tasks, err = s.db.GetAllTasks(status, limit, offset)
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API] Error getting tasks: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get tasks"})
 		return
 	}
 
@@ -234,7 +269,8 @@ func (s *Server) handleTriggerScan(c *gin.Context) {
 			return
 		}
 		// 其他启动错误（如果有）
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "启动扫描失败: " + err.Error()})
+		log.Printf("[API] 启动扫描失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "启动扫描失败"})
 		return
 	}
 
@@ -250,7 +286,8 @@ func (s *Server) handleRetryTask(c *gin.Context) {
 	}
 
 	if err := s.db.UpdateTaskStatus(id, database.StatusPending, "手动重试"); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API] Error retrying task %d: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retry task"})
 		return
 	}
 
@@ -261,7 +298,8 @@ func (s *Server) handleRetryTask(c *gin.Context) {
 func (s *Server) handleRetryFailedTasks(c *gin.Context) {
 	count, err := s.db.ResetFailedTasksToPending()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API] Error retrying failed tasks: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retry failed tasks"})
 		return
 	}
 
@@ -275,7 +313,8 @@ func (s *Server) handleRetryFailedTasks(c *gin.Context) {
 func (s *Server) handleRetryProcessingTasks(c *gin.Context) {
 	count, err := s.db.ResetProcessingTasksToPending()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API] Error retrying processing tasks: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retry processing tasks"})
 		return
 	}
 
@@ -294,7 +333,8 @@ func (s *Server) handleDeleteTask(c *gin.Context) {
 	}
 
 	if err := s.db.DeleteTask(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API] Error deleting task %d: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete task"})
 		return
 	}
 
@@ -385,20 +425,16 @@ func (s *Server) handleAddDirectory(c *gin.Context) {
 	}
 
 	if err := s.config.AddInputOutputPair(req.InputDir, req.OutputDir); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		log.Printf("[API] Error adding directory pair: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to add directory pair"})
 		return
 	}
 
 	warning := s.persistConfig()
 
-	// 使用应用程序生命周期 context，如果未设置则使用 Background
+	// 新增目录后异步触发扫描（使用独立的 context，不受 API 请求生命周期影响）
 	go func() {
-		ctx := s.ctx
-		if ctx == nil {
-			ctx = context.Background()
-			log.Println("[API] 警告：Server context 未设置，使用 Background context")
-		}
-		if err := s.scanner.Scan(ctx); err != nil {
+		if err := s.scanner.Scan(context.Background()); err != nil {
 			log.Printf("[API] 新增目录后立即扫描失败: %v", err)
 		}
 	}()
@@ -427,7 +463,8 @@ func (s *Server) handleRemoveDirectory(c *gin.Context) {
 	}
 
 	if err := s.config.RemoveInputOutputPair(req.InputDir); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		log.Printf("[API] Error removing directory pair: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to remove directory pair"})
 		return
 	}
 
@@ -459,9 +496,18 @@ func (s *Server) handleBrowseDirectory(c *gin.Context) {
 		return
 	}
 
+	// 安全检查：防止路径遍历攻击
+	// 只允许访问已配置的输入/输出目录及其父目录
+	if !s.isPathSafeForBrowsing(path) {
+		log.Printf("[API Security] 拒绝目录浏览请求，非法路径: %s, 来自: %s", path, c.ClientIP())
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该路径"})
+		return
+	}
+
 	info, err := os.Stat(path)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "路径不可访问: " + err.Error()})
+		log.Printf("[API] Error stating path %s: %v", path, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Path not accessible"})
 		return
 	}
 	if !info.IsDir() {
@@ -471,7 +517,8 @@ func (s *Server) handleBrowseDirectory(c *gin.Context) {
 
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取目录失败: " + err.Error()})
+		log.Printf("[API] Error reading directory %s: %v", path, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read directory"})
 		return
 	}
 
@@ -512,11 +559,45 @@ func (s *Server) handleBrowseDirectory(c *gin.Context) {
 	})
 }
 
+// isPathSafeForBrowsing 检查路径是否允许浏览（防止路径遍历攻击）
+// 使用 filepath.Rel 做严格的路径边界判断，避免前缀匹配导致的绕过
+func (s *Server) isPathSafeForBrowsing(path string) bool {
+	// 清理路径
+	cleanPath := filepath.Clean(path)
+
+	// 获取所有已配置的输入/输出目录
+	pairs := s.config.GetPairs()
+
+	// 收集所有合法目录
+	allowedDirs := make([]string, 0, len(pairs)*2)
+	for _, pair := range pairs {
+		allowedDirs = append(allowedDirs, filepath.Clean(pair.Input), filepath.Clean(pair.Output))
+	}
+
+	for _, dir := range allowedDirs {
+		// 精确匹配目录本身
+		if cleanPath == dir {
+			return true
+		}
+		// cleanPath 是 dir 的子路径
+		if rel, err := filepath.Rel(dir, cleanPath); err == nil && !strings.HasPrefix(rel, "..") {
+			return true
+		}
+		// dir 是 cleanPath 的子路径（允许浏览 dir 的父目录）
+		if rel, err := filepath.Rel(cleanPath, dir); err == nil && !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+
+	return false
+}
+
 // handleGetTrash 获取垃圾桶文件列表
 func (s *Server) handleGetTrash(c *gin.Context) {
 	files, err := s.cleaner.ListTrashFiles()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API] Error getting trash files: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get trash files"})
 		return
 	}
 
@@ -537,7 +618,8 @@ func (s *Server) handleDeleteTrash(c *gin.Context) {
 	filename := c.Param("filename")
 
 	if err := s.cleaner.DeleteTrashFile(filename); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API] Error deleting trash file %s: %v", filename, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete trash file"})
 		return
 	}
 
@@ -556,7 +638,8 @@ func (s *Server) handleRestoreTrash(c *gin.Context) {
 	}
 
 	if err := s.cleaner.RestoreTrashFile(req.Path); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		log.Printf("[API] Error restoring trash file %s: %v", req.Path, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to restore trash file"})
 		return
 	}
 

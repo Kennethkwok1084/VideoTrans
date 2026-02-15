@@ -324,14 +324,17 @@ type ScannerAdapter struct {
 	scanner *scanner.Scanner
 }
 
+// NewScannerAdapter creates a new scanner adapter.
 func NewScannerAdapter(s *scanner.Scanner) *ScannerAdapter {
 	return &ScannerAdapter{scanner: s}
 }
 
+// Name returns the component's name.
 func (a *ScannerAdapter) Name() string {
 	return "Scanner"
 }
 
+// Run starts the scanner.
 func (a *ScannerAdapter) Run(ctx context.Context) error {
 	// Scanner.RunPeriodically 会阻塞直到 ctx 取消
 	a.scanner.RunPeriodically(ctx)
@@ -343,14 +346,17 @@ type WorkerAdapter struct {
 	worker *worker.Worker
 }
 
+// NewWorkerAdapter creates a new worker adapter.
 func NewWorkerAdapter(w *worker.Worker) *WorkerAdapter {
 	return &WorkerAdapter{worker: w}
 }
 
+// Name returns the component's name.
 func (a *WorkerAdapter) Name() string {
 	return "Worker"
 }
 
+// Run starts the worker.
 func (a *WorkerAdapter) Run(ctx context.Context) error {
 	// Worker.Run 会阻塞直到 ctx 取消
 	a.worker.Run(ctx)
@@ -362,14 +368,17 @@ type CleanerAdapter struct {
 	cleaner *cleaner.Cleaner
 }
 
+// NewCleanerAdapter creates a new cleaner adapter.
 func NewCleanerAdapter(c *cleaner.Cleaner) *CleanerAdapter {
 	return &CleanerAdapter{cleaner: c}
 }
 
+// Name returns the component's name.
 func (a *CleanerAdapter) Name() string {
 	return "Cleaner"
 }
 
+// Run starts the cleaner.
 func (a *CleanerAdapter) Run(ctx context.Context) error {
 	// Cleaner.Run 会阻塞直到 ctx 取消
 	a.cleaner.Run(ctx)
@@ -381,14 +390,17 @@ type WebAdapter struct {
 	server *web.Server
 }
 
+// NewWebAdapter creates a new web adapter.
 func NewWebAdapter(s *web.Server) *WebAdapter {
 	return &WebAdapter{server: s}
 }
 
+// Name returns the component's name.
 func (a *WebAdapter) Name() string {
 	return "Web"
 }
 
+// Run starts the web server.
 func (a *WebAdapter) Run(ctx context.Context) error {
 	// 设置应用程序生命周期 context
 	a.server.SetContext(ctx)

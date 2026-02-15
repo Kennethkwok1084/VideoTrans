@@ -2,12 +2,14 @@ package cleaner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -240,9 +242,13 @@ func (c *Cleaner) safeMoveToTrash(srcPath string) (string, error) {
 	return trashPath, nil
 }
 
-// isLinkError 检查是否为跨设备链接错误
+// isLinkError checks if the error is a cross-device link error.
 func isLinkError(err error) bool {
-	return strings.Contains(err.Error(), "invalid cross-device link")
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		return errors.Is(linkErr.Err, syscall.EXDEV)
+	}
+	return false
 }
 
 // copyAndDelete 复制文件然后删除源文件
@@ -583,17 +589,14 @@ func (c *Cleaner) DeleteTrashFile(filename string) error {
 		log.Printf("[Cleaner] 手动删除垃圾桶文件: %s", filePath)
 
 		// 查询数据库中匹配的 soft_deleted 任务并更新状态
-		tasks, err := c.db.GetAllSoftDeleted()
-		if err == nil {
-			for _, task := range tasks {
-				if task.GetTrashPath() == filePath {
-					if err := c.db.MarkHardDeleted(task.ID); err != nil {
-						log.Printf("[Cleaner] 警告: 手动删除后更新数据库失败 (任务 %d): %v", task.ID, err)
-					} else {
-						log.Printf("[Cleaner] 已更新任务 %d 状态为 hard_deleted", task.ID)
-					}
-					break
-				}
+		task, err := c.db.GetSoftDeletedTaskByTrashPath(filePath)
+		if err != nil {
+			log.Printf("[Cleaner] 警告: 查询关联任务失败 (路径: %s): %v", filePath, err)
+		} else if task != nil {
+			if err := c.db.MarkHardDeleted(task.ID); err != nil {
+				log.Printf("[Cleaner] 警告: 手动删除后更新数据库失败 (任务 %d): %v", task.ID, err)
+			} else {
+				log.Printf("[Cleaner] 已更新任务 %d 状态为 hard_deleted", task.ID)
 			}
 		}
 

@@ -150,7 +150,7 @@ func TestGetPendingTasks(t *testing.T) {
 	}
 
 	// 获取待处理任务
-	tasks, err := db.GetPendingTasks(3)
+	tasks, err := db.GetPendingTasks(3, 3)
 	if err != nil {
 		t.Fatalf("获取待处理任务失败: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestClaimPendingTasks(t *testing.T) {
 	}
 
 	// Claim 3个任务
-	tasks, err := db.ClaimPendingTasks(3)
+	tasks, err := db.ClaimPendingTasks(3, 3)
 	if err != nil {
 		t.Fatalf("Claim任务失败: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestClaimPendingTasks(t *testing.T) {
 	}
 
 	// 再次查询pending任务，应该只剩2个
-	pendingTasks, err := db.GetPendingTasks(10)
+	pendingTasks, err := db.GetPendingTasks(10, 3)
 	if err != nil {
 		t.Fatalf("获取待处理任务失败: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestClaimPendingTasks(t *testing.T) {
 	}
 
 	// 再次 claim，应该能 claim 剩余的2个
-	moreTasks, err := db.ClaimPendingTasks(10)
+	moreTasks, err := db.ClaimPendingTasks(10, 3)
 	if err != nil {
 		t.Fatalf("第二次 Claim失败: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestClaimPendingTasks(t *testing.T) {
 	}
 
 	// 再次 claim 应该返回空列表
-	emptyTasks, err := db.ClaimPendingTasks(10)
+	emptyTasks, err := db.ClaimPendingTasks(10, 3)
 	if err != nil {
 		t.Fatalf("第三次 Claim失败: %v", err)
 	}
@@ -767,7 +767,7 @@ func TestGetPendingTasksRespectsNextRetryAt(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// 获取待处理任务
-	tasks, err := db.GetPendingTasks(10)
+	tasks, err := db.GetPendingTasks(10, 3)
 	if err != nil {
 		t.Fatalf("GetPendingTasks 失败: %v", err)
 	}
@@ -808,7 +808,7 @@ func TestClaimPendingTasksRespectsNextRetryAt(t *testing.T) {
 	_ = db.ScheduleRetry(task2.ID, time.Now().Add(5*time.Minute), "io_error")
 
 	// Claim 任务
-	tasks, err := db.ClaimPendingTasks(10)
+	tasks, err := db.ClaimPendingTasks(10, 3)
 	if err != nil {
 		t.Fatalf("ClaimPendingTasks 失败: %v", err)
 	}
@@ -951,7 +951,7 @@ func BenchmarkClaimPendingTasks10k(b *testing.B) {
 		b.StartTimer()
 		claimed := 0
 		for claimed < taskCount {
-			tasks, err := db.ClaimPendingTasks(batchSize)
+			tasks, err := db.ClaimPendingTasks(batchSize, 3)
 			if err != nil {
 				b.Fatalf("ClaimPendingTasks 失败: %v", err)
 			}
