@@ -548,7 +548,51 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 
 				// 执行转码（使用独立的 context，不受 ctx.Done() 影响）
 				taskCtx := context.Background()
-				if err := w.transcode(taskCtx, task, workerID); err != nil {
+
+				// 获取该 worker 对应的编码器 profile
+				var profile *config.EncoderProfile
+				var err error
+				
+				// 检查是否强制使用CPU（硬件编码兜底机制）
+				if task.RepairMode == "force_cpu" {
+					profile = w.config.GetCPUFallbackProfile()
+					metrics.FallbackForceCPUExecuted.Inc()
+					log.Printf("[Worker-%d] [Fallback-ForceCPU] task=%d detected force_cpu marker, use CPU profile=%s codec=%s", workerID, task.ID, profile.Name, profile.Codec)
+				} else {
+					profile, err = w.config.GetEncoderProfile(workerID)
+					if err != nil {
+						log.Printf("[Worker-%d] ❌ 获取编码器配置失败 #%d: %v", workerID, task.ID, err)
+						w.db.UpdateTaskStatus(task.ID, database.StatusFailed, fmt.Sprintf("配置错误: %v", err))
+						metrics.TranscodeFailed.Inc()
+						return
+					}
+				}
+
+				// 记录使用的编码器
+				log.Printf("[Worker-%d] 🎬 使用编码器: %s (类型: %s, codec: %s)", workerID, profile.Name, profile.Type, profile.Codec)
+
+				// 尝试使用指定的 profile 进行转码
+				err = w.transcode(taskCtx, task, workerID, profile)
+
+				// 硬件编码失败回退逻辑
+				if err != nil && w.config.CPUFallback && isHardwareProfile(profile) {
+					// 检查是否是硬件编码相关错误
+					if isHardwareEncodingError(err) {
+						log.Printf("[Worker-%d] ⚠️ 硬件编码失败，回退到 CPU 编码: %v", workerID, err)
+
+						// 获取 CPU 回退 profile
+						cpuProfile := w.config.GetCPUFallbackProfile()
+						log.Printf("[Worker-%d] 🔄 使用 CPU 回退编码器: %s (codec: %s)", workerID, cpuProfile.Name, cpuProfile.Codec)
+
+						// 使用 CPU profile 重试
+						err = w.transcode(taskCtx, task, workerID, cpuProfile)
+						if err == nil {
+							log.Printf("[Worker-%d] ✅ CPU 回退编码成功 #%d", workerID, task.ID)
+						}
+					}
+				}
+
+				if err != nil {
 					// 详细的错误日志
 					errMsg := err.Error()
 					log.Printf("[Worker-%d] ❌ 转码失败 #%d: %s", workerID, task.ID, task.SourcePath)
@@ -653,17 +697,70 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 					if outputDir != "" && relPath != "" {
 						outputPath := w.config.ApplyOutputExtension(filepath.Join(outputDir, relPath))
 						if info, err := os.Stat(outputPath); err == nil {
-							w.db.UpdateTaskOutputSize(task.ID, info.Size())
+							outputSize := info.Size()
+							w.db.UpdateTaskOutputSize(task.ID, outputSize)
 
-							// 计算节省的空间
+							// 硬件编码兜底机制：
+							// 1) 文件变大（负压缩）
+							// 2) 压缩率 < 10%
 							if task.SourceSize > 0 {
-								savedBytes := task.SourceSize - info.Size()
-								metrics.SpaceSaved.Add(float64(savedBytes))
+								isHardwareEncoding := profile.Type == "nvidia" || profile.Type == "intel"
+								savedBytes := task.SourceSize - outputSize
+								savedRatio := float64(savedBytes) / float64(task.SourceSize) * 100
+
+								if isHardwareEncoding && savedRatio < 10.0 {
+									metrics.FallbackSizeIncreaseTriggered.Inc()
+
+									reason := "硬件编码压缩率低于10%，交由CPU重新转码"
+									if outputSize > task.SourceSize {
+										reason = "硬件编码文件变大，交由CPU重新转码"
+										log.Printf("[Worker-%d] ⚠️ 硬件编码导致文件变大: %s (%.2f MB → %.2f MB, +%.1f%%)",
+											workerID, task.SourcePath,
+											float64(task.SourceSize)/1024/1024,
+											float64(outputSize)/1024/1024,
+											float64(outputSize-task.SourceSize)/float64(task.SourceSize)*100)
+										log.Printf("[Worker-%d] [Fallback-SizeIncrease] task=%d profile=%s type=%s source=%d output=%d", workerID, task.ID, profile.Name, profile.Type, task.SourceSize, outputSize)
+									} else {
+										log.Printf("[Worker-%d] ⚠️ 硬件编码压缩率偏低: %s (%.2f MB → %.2f MB, 节省 %.1f%% < 10%%)",
+											workerID, task.SourcePath,
+											float64(task.SourceSize)/1024/1024,
+											float64(outputSize)/1024/1024,
+											savedRatio)
+										log.Printf("[Worker-%d] [Fallback-LowCompression] task=%d profile=%s type=%s source=%d output=%d saved_ratio=%.2f", workerID, task.ID, profile.Name, profile.Type, task.SourceSize, outputSize, savedRatio)
+									}
+
+									if err := os.Remove(outputPath); err != nil {
+										log.Printf("[Worker-%d] 删除输出文件失败: %v", workerID, err)
+									} else {
+										log.Printf("[Worker-%d] 已删除输出文件，准备使用CPU重新转码", workerID)
+									}
+
+									w.db.UpdateTaskRepairMode(task.ID, "force_cpu")
+									w.db.UpdateTaskStatus(task.ID, database.StatusPending, reason)
+									w.db.UpdateTaskProgress(task.ID, 0)
+
+									log.Printf("[Worker-%d] [Fallback-Requeue] task=%d requeued with repair_mode=force_cpu", workerID, task.ID)
+									return // 不继续执行后续的完成逻辑
+								}
+							}
+
+							// 计算节省的空间（只记录正的节省量）
+							if task.SourceSize > 0 {
+								savedBytes := task.SourceSize - outputSize
+								if savedBytes > 0 {
+									metrics.SpaceSaved.Add(float64(savedBytes))
+								}
 							}
 						}
 					}
 
 					w.db.UpdateTaskProgress(task.ID, 100.0)
+
+					// 清除强制CPU标记（如果有）
+					if task.RepairMode == "force_cpu" {
+						w.db.UpdateTaskRepairMode(task.ID, "")
+						log.Printf("[Worker-%d] [Fallback-Clear] task=%d CPU success, clear repair_mode", workerID, task.ID)
+					}
 
 					// 更新状态为完成
 					w.db.UpdateTaskStatus(task.ID, database.StatusCompleted, "转码成功")
@@ -681,7 +778,7 @@ func (w *Worker) processWorker(ctx context.Context, workerID int) {
 }
 
 // transcode 执行FFmpeg转码
-func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID int) error {
+func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID int, profile *config.EncoderProfile) error {
 	// 源文件的完整路径就是task.SourcePath
 	inputPath := task.SourcePath
 
@@ -755,7 +852,7 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		}
 	}()
 
-	// 构建FFmpeg命令
+	// 构建FFmpeg命令（基于 EncoderProfile）
 	args := []string{
 		"-y",                  // 覆盖输出文件
 		"-progress", "pipe:1", // 输出进度到stdout
@@ -764,15 +861,50 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		args = append(args, "-fflags", "+discardcorrupt")
 		args = append(args, "-err_detect", "ignore_err")
 	}
-	args = append(args,
-		"-i", inputPath, // 输入文件
-		"-c:v", w.config.FFmpeg.Codec, // 视频编码器
-		"-preset", w.config.FFmpeg.Preset, // 预设
-		"-crf", strconv.Itoa(w.config.FFmpeg.CRF), // CRF质量
-		"-pix_fmt", "yuv420p", // 提高兼容性
-		"-c:a", w.config.FFmpeg.Audio, // 音频编码器
-		"-b:a", w.config.FFmpeg.AudioBitrate, // 音频比特率
-	)
+	args = append(args, "-i", inputPath) // 输入文件
+
+	// 根据 profile 添加视频编码参数
+	args = append(args, "-c:v", profile.Codec)
+	args = append(args, "-pix_fmt", "yuv420p") // 提高兼容性
+
+	// 添加 profile 中定义的参数
+	for key, value := range profile.Params {
+		switch key {
+		case "preset":
+			args = append(args, "-preset", value)
+		case "crf":
+			args = append(args, "-crf", value)
+		case "cq":
+			args = append(args, "-cq", value)
+		case "global_quality":
+			args = append(args, "-global_quality", value)
+		case "audio":
+			args = append(args, "-c:a", value)
+		case "audio_bitrate":
+			args = append(args, "-b:a", value)
+			// 其他参数可以继续添加
+		}
+	}
+
+	// 如果 profile 参数中没有音频设置，使用默认值
+	hasAudioCodec := false
+	hasAudioBitrate := false
+	for key := range profile.Params {
+		if key == "audio" {
+			hasAudioCodec = true
+		}
+		if key == "audio_bitrate" {
+			hasAudioBitrate = true
+		}
+	}
+	if !hasAudioCodec {
+		args = append(args, "-c:a", w.config.FFmpeg.Audio)
+	}
+	if !hasAudioBitrate {
+		args = append(args, "-b:a", w.config.FFmpeg.AudioBitrate)
+	}
+
+	// CFR 修复模式
 	if repairMode == "cfr" {
 		fps := w.config.FFmpeg.OutputFPS
 		if fps <= 0 {
@@ -780,6 +912,7 @@ func (w *Worker) transcode(ctx context.Context, task *database.Task, workerID in
 		}
 		args = append(args, "-fps_mode", "cfr", "-r", strconv.Itoa(fps))
 	}
+
 	args = append(args,
 		"-movflags", "+faststart", // 优化流式播放
 		outputTempPath, // 输出文件（临时）
@@ -1222,6 +1355,11 @@ func unescapeMountField(value string) string {
 
 // checkDiskSpace 检查磁盘空间
 func (w *Worker) checkDiskSpace(path string) error {
+	// 如果 MinDiskSpaceGB <= 0，禁用磁盘空间检查（用于测试环境）
+	if w.config.System.MinDiskSpaceGB <= 0 {
+		return nil
+	}
+
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return fmt.Errorf("获取磁盘信息失败: %w", err)
@@ -1237,4 +1375,57 @@ func (w *Worker) checkDiskSpace(path string) error {
 
 	log.Printf("[Worker] 磁盘可用空间: %.2fGB", availableGB)
 	return nil
+}
+
+func isHardwareProfile(profile *config.EncoderProfile) bool {
+	if profile == nil {
+		return false
+	}
+	if profile.Type == config.EncoderTypeNVIDIA || profile.Type == config.EncoderTypeIntel {
+		return true
+	}
+	codec := strings.ToLower(strings.TrimSpace(profile.Codec))
+	return strings.Contains(codec, "nvenc") || strings.Contains(codec, "qsv")
+}
+
+// isHardwareEncodingError 判断错误是否是硬件编码相关的错误
+func isHardwareEncodingError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := strings.ToLower(err.Error())
+
+	// NVIDIA 硬件编码错误特征
+	nvencErrors := []string{
+		"nvenc",
+		"cuda",
+		"no cuda-capable device",
+		"nvenc_open_encode_session",
+		"cannot load libcuda",
+		"cannot load libnvcuvid",
+		"driver not found",
+		"insufficient driver version",
+		"no hw acceleration encoder",
+	}
+
+	// Intel QSV 硬件编码错误特征
+	qsvErrors := []string{
+		"qsv",
+		"mfx",
+		"failed to initialize mfx",
+		"no such device",
+		"/dev/dri",
+		"vaapi",
+		"cannot open shared object",
+	}
+
+	// 检查所有硬件编码错误特征
+	for _, pattern := range append(nvencErrors, qsvErrors...) {
+		if strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+
+	return false
 }

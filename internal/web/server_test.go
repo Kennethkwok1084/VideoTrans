@@ -106,3 +106,30 @@ func TestHandleTriggerScan_Conflict(t *testing.T) {
 		}
 	})
 }
+
+func TestIsPathSafeForBrowsing(t *testing.T) {
+	s := &Server{}
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "allow /mnt root", path: "/mnt", want: true},
+		{name: "allow /mnt child", path: "/mnt/5252", want: true},
+		{name: "allow deep path", path: "/mnt/5252/media/videos", want: true},
+		{name: "reject root", path: "/", want: false},
+		{name: "reject /media", path: "/media", want: false},
+		{name: "reject /mnt2", path: "/mnt2", want: false},
+		{name: "reject /mnt sibling traversal style", path: "/mnt/../etc", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := s.isPathSafeForBrowsing(tt.path)
+			if got != tt.want {
+				t.Fatalf("isPathSafeForBrowsing(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}

@@ -606,7 +606,10 @@ func (c *Cleaner) DeleteTrashFile(filename string) error {
 	return fmt.Errorf("文件不存在")
 }
 
-// RestoreTrashFile 将垃圾桶文件恢复到原路径（仅支持存在数据库关联的 soft_deleted 任务）
+// RestoreTrashFile 将垃圾桶文件恢复到原路径
+// 支持两种情况：
+// 1. 数据库中有关联的 soft_deleted 任务记录 - 恢复到原始源路径
+// 2. 数据库中没有记录 - 从文件名推断原始名称，恢复到垃圾桶上一级目录
 func (c *Cleaner) RestoreTrashFile(trashPath string) error {
 	if strings.TrimSpace(trashPath) == "" {
 		return fmt.Errorf("垃圾桶路径不能为空")
@@ -634,21 +637,69 @@ func (c *Cleaner) RestoreTrashFile(trashPath string) error {
 		return fmt.Errorf("读取垃圾桶文件失败: %w", err)
 	}
 
+	var targetPath string
+
+	// 方案1: 尝试从数据库查询关联任务
 	task, err := c.db.GetSoftDeletedTaskByTrashPath(cleanPath)
-	if err != nil {
-		return fmt.Errorf("查询关联任务失败: %w", err)
-	}
-	if task == nil {
-		return fmt.Errorf("未找到关联任务，无法恢复原路径")
+	if err == nil && task != nil {
+		// 找到数据库记录
+		targetPath = c.resolveSourcePath(task.SourcePath)
+		if strings.TrimSpace(targetPath) == "" {
+			return fmt.Errorf("无法解析原始路径")
+		}
+
+		if _, err := os.Stat(targetPath); err == nil {
+			return fmt.Errorf("原始路径已存在同名文件: %s", targetPath)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return fmt.Errorf("创建目标目录失败: %w", err)
+		}
+
+		if err := os.Rename(cleanPath, targetPath); err != nil {
+			if !isLinkError(err) {
+				return fmt.Errorf("恢复文件失败: %w", err)
+			}
+			if err := c.copyAndDelete(cleanPath, targetPath); err != nil {
+				return fmt.Errorf("跨分区恢复失败: %w", err)
+			}
+		}
+
+		note := fmt.Sprintf("手动恢复于 %s", time.Now().Format(time.RFC3339))
+		if err := c.db.MarkRestored(task.ID, note); err != nil {
+			return fmt.Errorf("更新任务状态失败: %w", err)
+		}
+
+		log.Printf("[Cleaner] 手动恢复垃圾桶文件: %s -> %s (task=%d)", cleanPath, targetPath, task.ID)
+		return nil
 	}
 
-	targetPath := c.resolveSourcePath(task.SourcePath)
-	if strings.TrimSpace(targetPath) == "" {
-		return fmt.Errorf("无法解析原始路径")
+	// 方案2: 从文件名推断原始名称，恢复到垃圾桶上一级目录
+	trashDir := filepath.Dir(cleanPath)
+	parentDir := filepath.Dir(trashDir)
+	filename := filepath.Base(cleanPath)
+
+	// 从文件名中移除时间戳后缀 "_del_YYYYMMDD_HHMMSS"
+	// 例如: "video.mp4_del_20260215_205911" -> "video.mp4"
+	originalName := filename
+	parts := strings.Split(filename, "_del_")
+	if len(parts) >= 2 {
+		originalName = parts[0]
 	}
 
+	targetPath = filepath.Join(parentDir, originalName)
+
+	// 如果目标文件已存在，添加后缀 (1), (2) 等避免覆盖
 	if _, err := os.Stat(targetPath); err == nil {
-		return fmt.Errorf("原始路径已存在同名文件: %s", targetPath)
+		// 目标文件已存在，生成新名称
+		for i := 1; i < 1000; i++ {
+			ext := filepath.Ext(originalName)
+			base := strings.TrimSuffix(originalName, ext)
+			targetPath = filepath.Join(parentDir, fmt.Sprintf("%s(%d)%s", base, i, ext))
+			if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+				break
+			}
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
@@ -664,12 +715,7 @@ func (c *Cleaner) RestoreTrashFile(trashPath string) error {
 		}
 	}
 
-	note := fmt.Sprintf("手动恢复于 %s", time.Now().Format(time.RFC3339))
-	if err := c.db.MarkRestored(task.ID, note); err != nil {
-		return fmt.Errorf("更新任务状态失败: %w", err)
-	}
-
-	log.Printf("[Cleaner] 手动恢复垃圾桶文件: %s -> %s (task=%d)", cleanPath, targetPath, task.ID)
+	log.Printf("[Cleaner] 手动恢复垃圾桶文件（无DB记录）: %s -> %s", cleanPath, targetPath)
 	return nil
 }
 

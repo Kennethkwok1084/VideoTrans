@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +28,11 @@ type Config struct {
 	FFmpeg     FFmpegConfig    `yaml:"ffmpeg"`
 	Cleaning   CleaningConfig  `yaml:"cleaning"`
 	Log        LogConfig       `yaml:"log"`
+	// Hardware Encoding Support (Phase 5.x)
+	RunMode         string           `yaml:"run_mode"`         // "docker" or "systemd"
+	EncoderProfiles []EncoderProfile `yaml:"encoder_profiles"` // 编码器配置列表
+	WorkerMapping   []string         `yaml:"worker_mapping"`   // Worker到Profile名称的映射
+	CPUFallback     bool             `yaml:"cpu_fallback"`     // 硬件编码失败时回退到CPU
 }
 
 // SystemConfig 系统配置
@@ -42,6 +48,28 @@ type SystemConfig struct {
 	SkipDirs          []string `yaml:"skip_dirs"`
 	SkipFilePrefixes  []string `yaml:"skip_file_prefixes"`
 	SkipFileSuffixes  []string `yaml:"skip_file_suffixes"`
+	minDiskSpaceSet   bool     `yaml:"-"`
+}
+
+// UnmarshalYAML 自定义反序列化，用于识别 min_disk_space_gb 是否在 YAML 中显式设置。
+func (s *SystemConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawSystemConfig SystemConfig
+	var raw rawSystemConfig
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*s = SystemConfig(raw)
+
+	s.minDiskSpaceSet = false
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			if value.Content[i].Value == "min_disk_space_gb" {
+				s.minDiskSpaceSet = true
+				break
+			}
+		}
+	}
+	return nil
 }
 
 // WebConfig Web API 配置
@@ -77,6 +105,23 @@ type PathConfig struct {
 type InputOutputPair struct {
 	Input  string `yaml:"input" json:"input"`
 	Output string `yaml:"output" json:"output"`
+}
+
+// EncoderType 编码器类型
+type EncoderType string
+
+const (
+	EncoderTypeCPU    EncoderType = "cpu"    // CPU 编码（libx264/libx265）
+	EncoderTypeNVIDIA EncoderType = "nvidia" // NVIDIA 硬件编码 (h264_nvenc/hevc_nvenc)
+	EncoderTypeIntel  EncoderType = "intel"  // Intel QSV 硬件编码 (h264_qsv/hevc_qsv)
+)
+
+// EncoderProfile 编码器配置描述
+type EncoderProfile struct {
+	Name   string            `yaml:"name"`   // Profile名称，如"nvidia_high", "cpu_baseline"
+	Type   EncoderType       `yaml:"type"`   // 编码器类型: cpu/nvidia/intel
+	Codec  string            `yaml:"codec"`  // FFmpeg编码器名称: libx264, h264_nvenc, h264_qsv等
+	Params map[string]string `yaml:"params"` // 编码参数键值对，如 crf:"23", preset:"medium"
 }
 
 // FFmpegConfig FFmpeg配置
@@ -201,8 +246,15 @@ func (c *Config) validateLocked() error {
 	if c.System.MaxRetry <= 0 {
 		c.System.MaxRetry = 3
 	}
-	if c.System.MinDiskSpaceGB == 0 {
-		c.System.MinDiskSpaceGB = 5 // 默认至少5GB空闲
+	// MinDiskSpaceGB 默认为 5GB，用户可显式设置为 0 来禁用检查
+	if c.System.MinDiskSpaceGB < 0 {
+		return fmt.Errorf("min_disk_space_gb 不能为负数")
+	}
+
+	// 仅在当前值为 0 时考虑默认回填，避免覆盖用户设置的正数。
+	// 当 min_disk_space_gb 在 YAML 中显式设置为 0（用于禁用）时，不回填默认值。
+	if c.System.MinDiskSpaceGB == 0 && !c.System.minDiskSpaceSet {
+		c.System.MinDiskSpaceGB = 5
 	}
 	if len(c.System.SkipDirs) == 0 {
 		c.System.SkipDirs = []string{".stm_trash", "@eaDir", "#recycle", ".DS_Store"}
@@ -359,6 +411,11 @@ func (c *Config) validateLocked() error {
 		c.FFmpeg.DurationExtraMinutes = 15
 	}
 
+	// 验证和初始化硬件编码配置（Phase 5.x）
+	if err := c.validateEncoderConfig(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -384,17 +441,267 @@ func (c *Config) applyEnvOverrides() {
 	}
 }
 
+// validateEncoderConfig 验证和初始化硬件编码配置
+func (c *Config) validateEncoderConfig() error {
+	// 设置默认运行模式为 docker
+	if c.RunMode == "" {
+		c.RunMode = "docker"
+	}
+	c.RunMode = strings.ToLower(c.RunMode)
+	if c.RunMode != "docker" && c.RunMode != "systemd" {
+		return fmt.Errorf("run_mode 必须是 'docker' 或 'systemd'，当前值: %s", c.RunMode)
+	}
+
+	// 如果没有配置 encoder_profiles，使用默认 CPU profile
+	if len(c.EncoderProfiles) == 0 {
+		defaultCodec := c.FFmpeg.Codec
+		if defaultCodec == "" {
+			defaultCodec = "libx264"
+		}
+		defaultPreset := c.FFmpeg.Preset
+		if defaultPreset == "" {
+			defaultPreset = "medium"
+		}
+		defaultCRF := c.FFmpeg.CRF
+		if defaultCRF == 0 {
+			defaultCRF = 23
+		}
+		defaultAudio := c.FFmpeg.Audio
+		if defaultAudio == "" {
+			defaultAudio = "aac"
+		}
+		defaultAudioBitrate := c.FFmpeg.AudioBitrate
+		if defaultAudioBitrate == "" {
+			defaultAudioBitrate = "128k"
+		}
+
+		c.EncoderProfiles = []EncoderProfile{
+			{
+				Name:  "cpu_default",
+				Type:  EncoderTypeCPU,
+				Codec: defaultCodec,
+				Params: map[string]string{
+					"preset":        defaultPreset,
+					"crf":           strconv.Itoa(defaultCRF),
+					"audio":         defaultAudio,
+					"audio_bitrate": defaultAudioBitrate,
+				},
+			},
+		}
+	}
+
+	// 验证每个 profile
+	profileNames := make(map[string]bool)
+	for i, profile := range c.EncoderProfiles {
+		if profile.Name == "" {
+			return fmt.Errorf("encoder_profiles[%d]: name 不能为空", i)
+		}
+		if profileNames[profile.Name] {
+			return fmt.Errorf("encoder_profiles[%d]: 重复的 profile 名称 '%s'", i, profile.Name)
+		}
+		profileNames[profile.Name] = true
+
+		if profile.Codec == "" {
+			return fmt.Errorf("encoder_profiles[%d] (%s): codec 不能为空", i, profile.Name)
+		}
+		inferredType := inferEncoderType(profile.Codec)
+
+		// 验证类型
+		switch profile.Type {
+		case EncoderTypeCPU, EncoderTypeNVIDIA, EncoderTypeIntel:
+			// 有效类型
+		case "":
+			// 根据 codec 自动推断类型
+			c.EncoderProfiles[i].Type = inferredType
+		default:
+			return fmt.Errorf("encoder_profiles[%d] (%s): 无效的类型 '%s'，必须是 cpu/nvidia/intel", i, profile.Name, profile.Type)
+		}
+		normalizedType := c.EncoderProfiles[i].Type
+
+		// 防止 "type=cpu + 硬件codec" 绕过限制，自动以 codec 推断结果为准
+		if inferredType != EncoderTypeCPU && normalizedType == EncoderTypeCPU {
+			log.Printf("[Config] profile '%s' 的 codec=%s 推断为 %s，覆盖配置 type=cpu",
+				profile.Name, profile.Codec, inferredType)
+			c.EncoderProfiles[i].Type = inferredType
+			normalizedType = inferredType
+		}
+		// 非 CPU 类型应与 codec 推断一致，避免回退/调度语义混乱
+		if inferredType == EncoderTypeCPU && normalizedType != EncoderTypeCPU {
+			return fmt.Errorf("encoder_profiles[%d] (%s): codec '%s' 与 type '%s' 不匹配",
+				i, profile.Name, profile.Codec, normalizedType)
+		}
+		if inferredType != EncoderTypeCPU && normalizedType != EncoderTypeCPU && inferredType != normalizedType {
+			return fmt.Errorf("encoder_profiles[%d] (%s): codec '%s' 与 type '%s' 不匹配",
+				i, profile.Name, profile.Codec, normalizedType)
+		}
+
+		// Docker 模式下不允许硬件编码器
+		if c.RunMode == "docker" && isHardwareProfile(c.EncoderProfiles[i]) {
+			log.Printf("[Config] Docker 模式下将 profile '%s' 从 %s 降级为 CPU 编码", profile.Name, profile.Type)
+			// 自动降级为 CPU（保持原名称，只修改类型和编码器）
+			c.EncoderProfiles[i].Type = EncoderTypeCPU
+			c.EncoderProfiles[i].Codec = "libx264"
+			// 移除所有硬件特定的参数
+			if c.EncoderProfiles[i].Params == nil {
+				c.EncoderProfiles[i].Params = make(map[string]string)
+			}
+			delete(c.EncoderProfiles[i].Params, "cq")
+			delete(c.EncoderProfiles[i].Params, "global_quality")
+			// 强制覆盖 preset，避免保留硬件特定的值（如 NVENC 的 p1-p7）
+			newPreset := c.FFmpeg.Preset
+			if !isValidCPUEncoderPreset(newPreset) {
+				newPreset = "medium"
+			}
+			c.EncoderProfiles[i].Params["preset"] = newPreset
+			// 如果没有 CPU 编码参数，添加默认值
+			if _, hasCRF := c.EncoderProfiles[i].Params["crf"]; !hasCRF {
+				defaultCRF := c.FFmpeg.CRF
+				if defaultCRF == 0 {
+					defaultCRF = 23
+				}
+				c.EncoderProfiles[i].Params["crf"] = strconv.Itoa(defaultCRF)
+			}
+		}
+	}
+
+	// 如果没有配置 worker_mapping，默认所有 worker 使用第一个 profile
+	if len(c.WorkerMapping) == 0 {
+		if len(c.EncoderProfiles) > 0 {
+			c.WorkerMapping = []string{c.EncoderProfiles[0].Name}
+		}
+	}
+
+	// 验证 worker_mapping 引用的 profile 都存在
+	for i, name := range c.WorkerMapping {
+		if !profileNames[name] {
+			return fmt.Errorf("worker_mapping[%d]: 引用的 profile '%s' 不存在", i, name)
+		}
+	}
+
+	return nil
+}
+
+// isValidCPUEncoderPreset 验证给定的 preset 是否是 libx264/libx265 支持的有效值
+func isValidCPUEncoderPreset(preset string) bool {
+	switch preset {
+	case "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo":
+		return true
+	default:
+		return false
+	}
+}
+
+// inferEncoderType 根据 codec 名称推断编码器类型
+func inferEncoderType(codec string) EncoderType {
+	codec = strings.ToLower(codec)
+	if strings.Contains(codec, "nvenc") {
+		return EncoderTypeNVIDIA
+	}
+	if strings.Contains(codec, "qsv") {
+		return EncoderTypeIntel
+	}
+	return EncoderTypeCPU
+}
+
+func isHardwareProfile(profile EncoderProfile) bool {
+	if profile.Type == EncoderTypeNVIDIA || profile.Type == EncoderTypeIntel {
+		return true
+	}
+	return inferEncoderType(profile.Codec) != EncoderTypeCPU
+}
+
+// createCPUFallbackProfile 创建一个 CPU 回退 profile
+func (c *Config) createCPUFallbackProfile(name string) EncoderProfile {
+	preset := c.FFmpeg.Preset
+	if !isValidCPUEncoderPreset(preset) {
+		preset = "medium"
+	}
+	crf := c.FFmpeg.CRF
+	if crf == 0 {
+		crf = 23
+	}
+	audio := c.FFmpeg.Audio
+	if audio == "" {
+		audio = "aac"
+	}
+	audioBitrate := c.FFmpeg.AudioBitrate
+	if audioBitrate == "" {
+		audioBitrate = "128k"
+	}
+
+	return EncoderProfile{
+		Name:  name + "_cpu_fallback",
+		Type:  EncoderTypeCPU,
+		Codec: "libx264",
+		Params: map[string]string{
+			"preset":        preset,
+			"crf":           strconv.Itoa(crf),
+			"audio":         audio,
+			"audio_bitrate": audioBitrate,
+		},
+	}
+}
+
+// GetEncoderProfile 根据 worker ID 获取对应的编码器 profile
+func (c *Config) GetEncoderProfile(workerID int) (*EncoderProfile, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// 校验 workerID 有效性（应该是 1-based 正整数）
+	if workerID < 1 {
+		return nil, fmt.Errorf("workerID 必须 >= 1，当前值: %d", workerID)
+	}
+
+	if len(c.WorkerMapping) == 0 || len(c.EncoderProfiles) == 0 {
+		return nil, fmt.Errorf("编码器配置未初始化")
+	}
+
+	// 使用取模实现循环映射（workerID 是 1-based，需要转换为 0-based 索引）
+	profileName := c.WorkerMapping[(workerID-1)%len(c.WorkerMapping)]
+
+	// 查找对应的 profile
+	for i := range c.EncoderProfiles {
+		if c.EncoderProfiles[i].Name == profileName {
+			return &c.EncoderProfiles[i], nil
+		}
+	}
+
+	return nil, fmt.Errorf("未找到 profile: %s", profileName)
+}
+
+// GetCPUFallbackProfile 获取 CPU 回退 profile
+func (c *Config) GetCPUFallbackProfile() *EncoderProfile {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// 尝试找到第一个 CPU profile
+	for i := range c.EncoderProfiles {
+		if c.EncoderProfiles[i].Type == EncoderTypeCPU {
+			return &c.EncoderProfiles[i]
+		}
+	}
+
+	// 如果没有，创建一个默认的
+	profile := c.createCPUFallbackProfile("emergency_cpu")
+	return &profile
+}
+
 // Save 将当前配置持久化到文件。
 func (c *Config) Save() error {
 	c.mu.RLock()
 	configPath := c.ConfigPath
 	snapshot := Config{
-		System:    c.System,
-		Scheduler: c.Scheduler,
-		Retry:     c.Retry,
-		FFmpeg:    c.FFmpeg,
-		Cleaning:  c.Cleaning,
-		Log:       c.Log,
+		System:          c.System,
+		Web:             c.Web,
+		Scheduler:       c.Scheduler,
+		Retry:           c.Retry,
+		FFmpeg:          c.FFmpeg,
+		Cleaning:        c.Cleaning,
+		Log:             c.Log,
+		RunMode:         c.RunMode,
+		EncoderProfiles: append([]EncoderProfile(nil), c.EncoderProfiles...),
+		WorkerMapping:   append([]string(nil), c.WorkerMapping...),
+		CPUFallback:     c.CPUFallback,
 		Path: PathConfig{
 			Input:     c.Path.Input,
 			Inputs:    append([]string(nil), c.Path.Inputs...),

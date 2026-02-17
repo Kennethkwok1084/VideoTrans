@@ -149,6 +149,7 @@ func (s *Server) setupRoutes() {
 		api.GET("/trash", s.handleGetTrash)
 		api.DELETE("/trash/:filename", s.handleDeleteTrash)
 		api.POST("/trash/restore", s.handleRestoreTrash)
+		api.POST("/trash/restore-all", s.handleRestoreAllTrash)
 		api.GET("/health", s.handleHealth)
 	}
 
@@ -560,36 +561,18 @@ func (s *Server) handleBrowseDirectory(c *gin.Context) {
 }
 
 // isPathSafeForBrowsing 检查路径是否允许浏览（防止路径遍历攻击）
-// 使用 filepath.Rel 做严格的路径边界判断，避免前缀匹配导致的绕过
+// 当前策略：只允许浏览 /mnt 目录及其子目录。
 func (s *Server) isPathSafeForBrowsing(path string) bool {
-	// 清理路径
 	cleanPath := filepath.Clean(path)
-
-	// 获取所有已配置的输入/输出目录
-	pairs := s.config.GetPairs()
-
-	// 收集所有合法目录
-	allowedDirs := make([]string, 0, len(pairs)*2)
-	for _, pair := range pairs {
-		allowedDirs = append(allowedDirs, filepath.Clean(pair.Input), filepath.Clean(pair.Output))
+	allowedRoot := "/mnt"
+	if cleanPath == allowedRoot {
+		return true
 	}
-
-	for _, dir := range allowedDirs {
-		// 精确匹配目录本身
-		if cleanPath == dir {
-			return true
-		}
-		// cleanPath 是 dir 的子路径
-		if rel, err := filepath.Rel(dir, cleanPath); err == nil && !strings.HasPrefix(rel, "..") {
-			return true
-		}
-		// dir 是 cleanPath 的子路径（允许浏览 dir 的父目录）
-		if rel, err := filepath.Rel(cleanPath, dir); err == nil && !strings.HasPrefix(rel, "..") {
-			return true
-		}
+	rel, err := filepath.Rel(allowedRoot, cleanPath)
+	if err != nil {
+		return false
 	}
-
-	return false
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // handleGetTrash 获取垃圾桶文件列表
@@ -639,11 +622,66 @@ func (s *Server) handleRestoreTrash(c *gin.Context) {
 
 	if err := s.cleaner.RestoreTrashFile(req.Path); err != nil {
 		log.Printf("[API] Error restoring trash file %s: %v", req.Path, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to restore trash file"})
+		// 返回真实错误信息给前端
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "文件已恢复到原路径"})
+}
+
+// handleRestoreAllTrash 一键恢复垃圾桶中所有文件
+func (s *Server) handleRestoreAllTrash(c *gin.Context) {
+	files, err := s.cleaner.ListTrashFiles()
+	if err != nil {
+		log.Printf("[API] Error listing trash files for restore-all: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取垃圾桶列表失败"})
+		return
+	}
+
+	if len(files) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message":  "垃圾桶为空，无需恢复",
+			"total":    0,
+			"restored": 0,
+			"failed":   0,
+			"errors":   []gin.H{},
+		})
+		return
+	}
+
+	restored := 0
+	failed := 0
+	errorsList := make([]gin.H, 0)
+
+	for _, file := range files {
+		if err := s.cleaner.RestoreTrashFile(file.Path); err != nil {
+			failed++
+			errorsList = append(errorsList, gin.H{
+				"name":  file.Name,
+				"path":  file.Path,
+				"error": err.Error(),
+			})
+			log.Printf("[API] Restore-all failed: %s (%s): %v", file.Name, file.Path, err)
+			continue
+		}
+		restored++
+	}
+
+	resp := gin.H{
+		"message":  "批量恢复完成",
+		"total":    len(files),
+		"restored": restored,
+		"failed":   failed,
+		"errors":   errorsList,
+	}
+
+	if failed > 0 {
+		c.JSON(http.StatusMultiStatus, resp)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // handleHealth 健康检查

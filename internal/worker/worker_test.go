@@ -334,7 +334,7 @@ func TestProcessWorkerNonRetryableFailure(t *testing.T) {
 }
 
 func TestTranscodeTimeout(t *testing.T) {
-	w, db, _, inputDir, _ := newWorkerTestFixture(t)
+	w, db, cfg, inputDir, _ := newWorkerTestFixture(t)
 	defer db.Close()
 
 	t.Setenv("STM_TEST_FFMPEG_EXIT_CODE", "0")
@@ -348,12 +348,72 @@ func TestTranscodeTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := w.transcode(ctx, task, 1)
+	// 获取编码器 profile
+	profile, err := cfg.GetEncoderProfile(1)
+	if err != nil {
+		t.Fatalf("获取编码器 profile 失败: %v", err)
+	}
+
+	err = w.transcode(ctx, task, 1, profile)
 	if err == nil {
 		t.Fatal("应返回超时错误")
 	}
 	if !strings.Contains(err.Error(), "FFmpeg超时") {
 		t.Fatalf("错误信息不符合预期: %v", err)
+	}
+}
+
+func TestIsHardwareProfile(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile *config.EncoderProfile
+		want    bool
+	}{
+		{
+			name:    "nil profile",
+			profile: nil,
+			want:    false,
+		},
+		{
+			name: "cpu type but nvenc codec",
+			profile: &config.EncoderProfile{
+				Type:  config.EncoderTypeCPU,
+				Codec: "h264_nvenc",
+			},
+			want: true,
+		},
+		{
+			name: "cpu type but qsv codec",
+			profile: &config.EncoderProfile{
+				Type:  config.EncoderTypeCPU,
+				Codec: "h264_qsv",
+			},
+			want: true,
+		},
+		{
+			name: "nvidia type",
+			profile: &config.EncoderProfile{
+				Type:  config.EncoderTypeNVIDIA,
+				Codec: "libx264",
+			},
+			want: true,
+		},
+		{
+			name: "plain cpu profile",
+			profile: &config.EncoderProfile{
+				Type:  config.EncoderTypeCPU,
+				Codec: "libx264",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isHardwareProfile(tt.profile); got != tt.want {
+				t.Fatalf("isHardwareProfile()=%v, want=%v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -384,7 +444,7 @@ func newWorkerTestFixture(t *testing.T) (*Worker, *database.DB, *config.Config, 
 			CronEnd:           0,
 			MaxWorkers:        1,
 			TaskQueueSize:     4,
-			MinDiskSpaceGB:    0,
+			MinDiskSpaceGB:    0, // 测试中禁用磁盘空间检查
 			SchedulerInterval: 1,
 			MaxRetry:          3,
 		},
@@ -421,6 +481,14 @@ func newWorkerTestFixture(t *testing.T) (*Worker, *database.DB, *config.Config, 
 			FFprobePath:          "ffprobe",
 		},
 	}
+
+	// 验证配置（这会初始化编码器配置）
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("配置验证失败: %v", err)
+	}
+
+	// 测试环境中禁用磁盘空间检查（避免依赖真实磁盘空间）
+	cfg.System.MinDiskSpaceGB = 0
 
 	return New(cfg, db), db, cfg, inputDir, outputDir
 }

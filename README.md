@@ -29,7 +29,11 @@ STM（Smart Transcode Manager）是一个全自动视频转码系统，专为 NA
 
 ## 🚀 快速开始
 
-### 使用 Docker Compose（推荐）
+> **部署方式选择:**
+> - **Docker 部署**: 简单快速，仅支持 CPU 编码
+> - **Systemd 部署**: 支持 NVIDIA/Intel 硬件加速，适合生产环境 → [查看 Systemd 部署指南](deploy/systemd/README_SYSTEMD.md)
+
+### 使用 Docker Compose（CPU 编码）
 
 1. **克隆项目**
 
@@ -70,6 +74,27 @@ docker-compose logs -f
 4. **访问 Web 界面**
 
 打开浏览器访问：`http://your-server-ip:9999`
+
+### 使用 Systemd 部署（支持硬件加速）⚡
+
+**适用场景**: 需要 NVIDIA GPU 或 Intel QSV 硬件加速
+
+**快速部署**:
+```bash
+# 运行快速部署脚本（自动检测硬件并配置）
+sudo deploy/systemd/quickstart.sh
+
+# 或使用 Makefile
+make quick-deploy
+```
+
+**查看完整文档**: [Systemd 部署指南](deploy/systemd/README_SYSTEMD.md)
+
+包含内容:
+- NVIDIA GPU 和 Intel QSV 配置指南
+- 硬件加速环境检测和测试
+- 完整的安装、配置和故障排查步骤
+- 10+ 配置示例（单GPU、多GPU、混合等）
 
 ### 本地运行（开发环境）
 

@@ -1,0 +1,42 @@
+[Unit]
+Description=STM - Smart Transcode Manager with Hardware Acceleration
+Documentation=https://github.com/yourname/stm
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/stm
+ExecStart=/opt/stm/bin/stm -config /opt/stm/configs/config.yaml
+Restart=on-failure
+RestartSec=10s
+
+# 环境变量
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="STM_TEMPLATES_PATH=/opt/stm/internal/web/templates/"
+
+# NVIDIA GPU 支持
+Environment="NVIDIA_VISIBLE_DEVICES=all"
+Environment="NVIDIA_DRIVER_CAPABILITIES=compute,video,utility"
+
+# Intel QSV 支持 (确保可访问 /dev/dri)
+SupplementaryGroups=video render
+
+# 资源限制
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# 日志配置
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stm
+
+# 安全增强(可选，根据实际需求调整)
+# NoNewPrivileges=true
+# PrivateTmp=true
+# ProtectSystem=strict
+# ReadWritePaths=/data /mnt
+
+[Install]
+WantedBy=multi-user.target

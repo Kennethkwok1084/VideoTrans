@@ -64,6 +64,18 @@ var (
 		Help: "Total number of files permanently deleted",
 	})
 
+	// FallbackSizeIncreaseTriggered 硬件编码输出变大触发CPU兜底次数
+	FallbackSizeIncreaseTriggered = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "stm_fallback_size_increase_triggered_total",
+		Help: "Total number of fallback-to-CPU triggers caused by hardware output size increase",
+	})
+
+	// FallbackForceCPUExecuted 强制CPU兜底执行次数（读取到 force_cpu 标记）
+	FallbackForceCPUExecuted = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "stm_fallback_force_cpu_executed_total",
+		Help: "Total number of tasks executed with forced CPU fallback",
+	})
+
 	// DiskSpaceAvailable 可用磁盘空间（字节）
 	DiskSpaceAvailable = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "stm_disk_space_available_bytes",

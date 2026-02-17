@@ -51,10 +51,16 @@
                         占用 <span id="totalSize" class="font-medium">0 MB</span>
                     </p>
                 </div>
-                <button onclick="emptyTrash()"
-                    class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition">
-                    清空垃圾桶
-                </button>
+                <div class="flex gap-3">
+                    <button onclick="restoreAllFiles()"
+                        class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition">
+                        一键恢复全部
+                    </button>
+                    <button onclick="emptyTrash()"
+                        class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition">
+                        清空垃圾桶
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -267,6 +273,36 @@
                 }
             } catch (err) {
                 alert('恢复失败: ' + err.message);
+            }
+        }
+
+        // 一键恢复全部文件
+        async function restoreAllFiles() {
+            if (!confirm('确定要恢复垃圾桶中的所有文件到原路径吗？')) return;
+            if (!confirm('最后确认：将尝试恢复全部文件，是否继续？')) return;
+
+            try {
+                const res = await fetch('/api/trash/restore-all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await res.json();
+
+                if (res.status === 207) {
+                    let msg = `部分恢复成功：成功 ${data.restored || 0} 个，失败 ${data.failed || 0} 个`;
+                    if (Array.isArray(data.errors) && data.errors.length > 0) {
+                        const sample = data.errors.slice(0, 3).map(e => `${e.name}: ${e.error}`).join('\n');
+                        msg += `\n\n失败示例:\n${sample}`;
+                    }
+                    alert(msg);
+                } else if (res.ok) {
+                    alert(`恢复完成：成功 ${data.restored || 0} 个，失败 ${data.failed || 0} 个`);
+                } else {
+                    alert('批量恢复失败: ' + (data.error || '未知错误'));
+                }
+                loadTrashFiles();
+            } catch (err) {
+                alert('批量恢复失败: ' + err.message);
             }
         }
 
